@@ -1,7 +1,10 @@
 # STATS-402 - Interdisciplinary Data Analysis
 ## Short-Horizon Temporal Optical Flow with Physics-Informed Consistency
-### Sihan Yao, Yuxuan Huang
-### sihan.yao@dukekunshan.edu.cn, y.huang@dukekunshan.edu.cn
+<h3 align="center">Sihan Yao, Yuxuan Huang</h3>
+<p align="center">
+  <a href="mailto:sihan.yao@dukekunshan.edu.cn">sihan.yao@dukekunshan.edu.cn</a> · 
+  <a href="mailto:y.huang@dukekunshan.edu.cn">y.huang@dukekunshan.edu.cn</a>
+</p>
 
 This project investigates **short-horizon spatiotemporal optical / scene flow estimation** by moving beyond 
 the traditional two-frame formulation and treating motion as a temporally evolving spatial field. Instead of estimating
@@ -13,5 +16,5 @@ model to capture both:
 - Global spatiotemporal structure (motion evolution)
 
 Pipeline
-#[!Workflow1](Images/Readme_Supplements/Workflow%201.PNG)
-#[!Workflow2](Images/Readme_Supplements/Workflow%202.PNG)
+![Workflow1](Images/Readme_Supplements/Workflow%201.PNG)
+![Workflow2](Images/Readme_Supplements/Workflow%202.PNG)
