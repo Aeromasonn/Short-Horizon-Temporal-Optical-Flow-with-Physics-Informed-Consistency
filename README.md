@@ -31,3 +31,11 @@ Stage 1: With sobel operator, without self-supervised; After 50 epochs
 ![sample_4](Images/Readme_Supplements/sample_4.png)
 - loss(After 50 epochs)
 ![loss_50_epoch](Images/Readme_Supplements/loss_50_epoch.png)
+
+Stage 2: Adding Self_supervise:
+- sample1:
+![self_supervised_1](Images/Readme_Supplements/self_supervised_1.png)
+- sample2:
+![self_supervised_1](Images/Readme_Supplements/self_supervised_1.png)
+- loss(After 50 epochs)
+![loss_50_epoch](Images/Readme_Supplements/loss_50_epoch_supervised.png)
