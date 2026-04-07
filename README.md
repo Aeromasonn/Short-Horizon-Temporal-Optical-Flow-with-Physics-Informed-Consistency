@@ -18,3 +18,16 @@ model to capture both:
 Pipeline
 ![Workflow1](Images/Readme_Supplements/Workflow%201.PNG)
 ![Workflow2](Images/Readme_Supplements/Workflow%202.PNG)
+
+Outcome
+Stage 1: With sobel operator, without self-supervised; After 50 epochs
+- sample1:
+![sample_1](Images/Readme_Supplements/sample_1.PNG)
+- sample2:
+![sample_2](Images/Readme_Supplements/sample_2.PNG)
+- sample3:
+![sample_3](Images/Readme_Supplements/sample_3.PNG)
+- sample4:
+![sample_4](Images/Readme_Supplements/sample_4.PNG)
+- loss(After 50 epochs)
+![loss_50_epoch](Images/Readme_Supplements/loss_50_epoch.PNG)
