@@ -36,6 +36,15 @@ Stage 2: Adding Self_supervise:
 - sample1:
 ![self_supervised_1](Images/Readme_Supplements/self_supervised_1.png)
 - sample2:
-![self_supervised_2](Images/Readme_Supplements/self_supervised_2.png)
+![self_supervised_2](Images/Readme_Supplements/self_supervised_2-.png)
 - loss(After 50 epochs)
-![loss_50_epoch](Images/Readme_Supplements/loss_50_epoch_supervised.png)
+![loss_50_epoch_supervised](Images/Readme_Supplements/loss_50_epoch_supervised.png)
+
+Stage3: Adding Edge Awarness, Run in Cluster for 200 epochs:
+- sample1:
+![stage3_1](Images/Readme_Supplements/stage3_1.png)
+- sample2:
+![stage3_2](Images/Readme_Supplements/stage3_2.png)
+- sample3:
+![stage3_3](Images/Readme_Supplements/stage3_3.png)
+![loss_200_epoch_stage3](Images/Readme_Supplements/stage3_loss_200_epoch.png)

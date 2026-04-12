@@ -1,3 +1,10 @@
 .idea
 Data
 */__pycache__
+
+# checkpoints
+checkpoints/
+*.pth
+
+# visualization outputs
+visualization_outputs/
