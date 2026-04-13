@@ -328,12 +328,25 @@ class SpatialTemporalFusion(nn.Module):
         return fused
 
 
+
 class SpatialTemporalFusion_timeAware(nn.Module):
     """
-    The same as class SpatialTemporalFusion. But returns:
+    Lightweight pre-UNO fusion for a B*Tm workflow.
 
-    Output:
-      fused: [B, Tm, out_ch, H, W]
+    This module intentionally removes the older heavy temporal mixing via
+    frame-stacked 2D convolutions across all time steps. Instead it keeps the
+    output contract expected by the downstream UNO + decoder stack:
+
+      input  : visual_feats [B, T,  Cv, H, W]
+               motion_feats [B, Tm, Cm, H, W]
+      output : fused_seq    [B, Tm, out_ch, H, W]
+
+    Temporal awareness is kept lightweight and local before UNO by injecting:
+      1) visual forward difference  phi_v(t+1) - phi_v(t)
+      2) motion causal difference   phi_m(t)   - phi_m(t-1)
+      3) causal running mean of pairwise fused features
+
+    The heavier multi-scale spatial reasoning is then left to UNO.
     """
 
     def __init__(self, visual_ch=64, motion_ch=64, num_pairs=3, hidden_ch=128, out_ch=128):
@@ -341,22 +354,33 @@ class SpatialTemporalFusion_timeAware(nn.Module):
         self.num_pairs = num_pairs
         self.visual_ch = visual_ch
         self.motion_ch = motion_ch
-        self.fuse_in = visual_ch + motion_ch
         self.out_ch = out_ch
 
-        self.fusion = nn.Sequential(
-            ConvBlock(self.fuse_in, hidden_ch, k=3, s=1, p=1),
+        # Current pairwise content.
+        self.local_in = visual_ch + motion_ch
+
+        # Lightweight temporal hints fed into UNO instead of performing a heavy
+        # temporal fusion block here.
+        self.temporal_hint_in = visual_ch + motion_ch
+
+        # local pair content + temporal difference hints + causal context
+        self.pre_uno_in = self.local_in + self.temporal_hint_in + self.local_in
+
+        self.local_proj = nn.Sequential(
+            ConvBlock(self.pre_uno_in, hidden_ch, k=1, s=1, p=0),
             ConvBlock(hidden_ch, hidden_ch, k=3, s=1, p=1),
             ConvBlock(hidden_ch, out_ch, k=3, s=1, p=1),
         )
 
+        self.residual_proj = nn.Conv2d(self.local_in, out_ch, kernel_size=1, stride=1, padding=0)
+
     def forward(self, visual_feats, motion_feats):
         """
-        visual_feats: [B, T, Cv, H, W]
-        motion_feats: [B, T-1, Cm, H, W]
+        visual_feats: [B, T,  Cv, H, W]
+        motion_feats: [B, Tm, Cm, H, W]
 
         returns:
-            fused: [B, out_ch, H, W]
+            fused_seq: [B, Tm, out_ch, H, W]
         """
         B, Tv, Cv, H, W = visual_feats.shape
         Bm, Tm, Cm, Hm, Wm = motion_feats.shape
@@ -367,18 +391,43 @@ class SpatialTemporalFusion_timeAware(nn.Module):
         assert Cm == self.motion_ch, f"Expected motion_ch={self.motion_ch}, got {Cm}"
         assert Tv >= Tm, f"Need at least Tm visual steps, got Tv={Tv}, Tm={Tm}"
 
-        # align raw-frame visual features to pairwise motion time steps
-        # example: from 4 frames keep first 3 features to align with 3 flows
+        # Align raw-frame visual features to pairwise motion time steps.
         visual_aligned = visual_feats[:, :Tm]  # [B, Tm, Cv, H, W]
 
-        # concatenate branch outputs at each time step
-        fused_seq = torch.cat([visual_aligned, motion_feats], dim=2)  # [B, Tm, Cv+Cm, H, W]
+        # Optional next-step visual cue for local temporal awareness.
+        if Tv >= Tm + 1:
+            visual_next = visual_feats[:, 1:Tm + 1]
+            visual_delta = visual_next - visual_aligned
+        else:
+            visual_delta = torch.zeros_like(visual_aligned)
 
-        # frame-stacked 2D conv:
-        # stack temporal dimension into channel dimension
-        fused_seq = fused_seq.reshape(B * Tm, Cv + Cm, H, W)
-        fused_seq = self.fusion(fused_seq)  # [B*Tm, out_ch, H, W]
+        # Motion causal delta: each step knows how motion embedding changes from
+        # the previous pair, while staying compatible with B*Tm processing.
+        motion_prev = torch.zeros_like(motion_feats)
+        if Tm > 1:
+            motion_prev[:, 1:] = motion_feats[:, :-1]
+        motion_delta = motion_feats - motion_prev
+
+        # Current per-step pair content.
+        pair_local = torch.cat([visual_aligned, motion_feats], dim=2)  # [B, Tm, Cv+Cm, H, W]
+
+        # Temporal hints that will be handed to UNO as extra channels.
+        temporal_hint = torch.cat([visual_delta, motion_delta], dim=2)  # [B, Tm, Cv+Cm, H, W]
+
+        # Lightweight causal context summary over previous pairwise features.
+        running_context = []
+        running_sum = torch.zeros_like(pair_local[:, 0])
+        for t in range(Tm):
+            running_sum = running_sum + pair_local[:, t]
+            running_context.append(running_sum / float(t + 1))
+        running_context = torch.stack(running_context, dim=1)  # [B, Tm, Cv+Cm, H, W]
+
+        # Keep the UNO workflow on B*Tm samples while preserving output shape.
+        pre_uno = torch.cat([pair_local, temporal_hint, running_context], dim=2)
+        pre_uno = pre_uno.reshape(B * Tm, self.pre_uno_in, H, W)
+        pair_local_2d = pair_local.reshape(B * Tm, self.local_in, H, W)
+
+        fused_seq = self.local_proj(pre_uno) + self.residual_proj(pair_local_2d)
         fused_seq = fused_seq.reshape(B, Tm, self.out_ch, H, W)
 
         return fused_seq
-

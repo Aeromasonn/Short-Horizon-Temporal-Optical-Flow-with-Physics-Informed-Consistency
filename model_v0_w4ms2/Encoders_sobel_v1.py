@@ -25,13 +25,38 @@ class ConvBlock(nn.Module):
         return self.block(x)
 
 
+class SobelEdgeExtractor(nn.Module):
+    """
+    Compute Sobel edge magnitude from RGB image.
+    Input:  [B, 3, H, W]
+    Output: [B, 1, H, W]
+    """
+    def __init__(self):
+        super().__init__()
+        sobel_x = torch.tensor([[1, 0, -1],
+                                [2, 0, -2],
+                                [1, 0, -1]], dtype=torch.float32).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[1, 2, 1],
+                                [0, 0, 0],
+                                [-1, -2, -1]], dtype=torch.float32).view(1, 1, 3, 3)
+        self.register_buffer("sobel_x", sobel_x)
+        self.register_buffer("sobel_y", sobel_y)
+
+    def forward(self, x):
+        gray = x.mean(dim=1, keepdim=True)  # [B, 1, H, W]
+        gx = F.conv2d(gray, self.sobel_x, padding=1)
+        gy = F.conv2d(gray, self.sobel_y, padding=1)
+        mag = torch.sqrt(gx ** 2 + gy ** 2 + 1e-6)
+        return mag
+
+
 class FeaturePyramidCNN(nn.Module):
     """
     Shared CNN backbone for all input images.
-    Input:  [B, 3, H, W]
+    Input:  [B, 4, H, W] after RGB + Sobel concatenation
     Output: [B, C, H/8, W/8]
     """
-    def __init__(self, in_ch=3, base_ch=16, out_ch=64):
+    def __init__(self, in_ch=4, base_ch=16, out_ch=64):
         super().__init__()
         self.net = nn.Sequential(
             ConvBlock(in_ch, base_ch, k=3, s=2, p=1),          # H/2
@@ -86,7 +111,7 @@ class LocalCorrelation(nn.Module):
 class PairwiseFlowEncoder(nn.Module):
     """
     First-stage encoder:
-      image pair -> shared CNN -> correlation -> fused motion embedding
+      image pair -> Sobel augmentation -> shared CNN -> correlation -> fused motion embedding
 
     Returns:
       pair_feat: [B, embed_ch, H/8, W/8]
@@ -95,7 +120,8 @@ class PairwiseFlowEncoder(nn.Module):
     """
     def __init__(self, feat_ch=64, corr_radius=4, embed_ch=128, predict_flow=True):
         super().__init__()
-        self.feature_net = FeaturePyramidCNN(in_ch=3, base_ch=16, out_ch=feat_ch)
+        self.sobel = SobelEdgeExtractor()
+        self.feature_net = FeaturePyramidCNN(in_ch=4, base_ch=16, out_ch=feat_ch)
         self.corr = LocalCorrelation(radius=corr_radius)
 
         corr_ch = (2 * corr_radius + 1) ** 2
@@ -113,12 +139,20 @@ class PairwiseFlowEncoder(nn.Module):
                 nn.Conv2d(64, 2, kernel_size=3, stride=1, padding=1)
             )
 
+    def _augment_with_sobel(self, img):
+        edge = self.sobel(img)
+        img_aug = torch.cat([img, edge], dim=1)  # [B, 4, H, W]
+        return img_aug
+
     def forward(self, img1, img2):
         """
         img1, img2: [B, 3, H, W]
         """
-        feat1 = self.feature_net(img1)   # [B, C, H/8, W/8]
-        feat2 = self.feature_net(img2)   # [B, C, H/8, W/8]
+        img1_aug = self._augment_with_sobel(img1)
+        img2_aug = self._augment_with_sobel(img2)
+
+        feat1 = self.feature_net(img1_aug)   # [B, C, H/8, W/8]
+        feat2 = self.feature_net(img2_aug)   # [B, C, H/8, W/8]
 
         corr = self.corr(feat1, feat2)   # [B, corr_ch, H/8, W/8]
 
@@ -381,4 +415,3 @@ class SpatialTemporalFusion_timeAware(nn.Module):
         fused_seq = fused_seq.reshape(B, Tm, self.out_ch, H, W)
 
         return fused_seq
-
