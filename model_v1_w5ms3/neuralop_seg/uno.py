@@ -7,13 +7,13 @@ import warnings
 
 warnings.filterwarnings("once", category=UserWarning)
 
-from channel_mlp import ChannelMLP
-from spectral_convolution import SpectralConv
-from skip_connections import skip_connection
-from padding import DomainPadding
-from fno_block import FNOBlocks
-from resample import resample
-from embeddings import GridEmbedding2D, GridEmbeddingND
+from .channel_mlp import ChannelMLP
+from .spectral_convolution import SpectralConv
+from .skip_connections import skip_connection
+from .padding import DomainPadding
+from .fno_block import FNOBlocks
+from .resample import resample
+from .embeddings import GridEmbedding2D, GridEmbeddingND
 
 
 class UNO(nn.Module):

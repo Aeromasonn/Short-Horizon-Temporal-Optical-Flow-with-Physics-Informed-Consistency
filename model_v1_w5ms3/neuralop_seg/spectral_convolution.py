@@ -1,6 +1,6 @@
 from typing import List, Optional, Tuple, Union
 
-from ..utils import validate_scaling_factor
+from .utils import validate_scaling_factor
 
 import torch
 from torch import nn

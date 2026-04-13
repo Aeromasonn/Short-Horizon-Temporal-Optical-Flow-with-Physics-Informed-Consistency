@@ -9,7 +9,7 @@ from .complex import CGELU, ctanh, ComplexValued
 from .normalization_layers import AdaIN, InstanceNorm, BatchNorm
 from .skip_connections import skip_connection
 from .spectral_convolution import SpectralConv
-from ..utils import validate_scaling_factor
+from .utils import validate_scaling_factor
 
 
 Number = Union[int, float]
