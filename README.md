@@ -32,10 +32,22 @@ Stage 1: With sobel operator, without self-supervised; After 50 epochs
 - loss(After 50 epochs)
 ![loss_50_epoch](Images/Readme_Supplements/loss_50_epoch.png)
 
-Stage 2: Adding Self_supervise:
+Stage 2: Adding Self_supervise, Run in Cluster for 200 epochs:
 - sample1:
-![self_supervised_1](Images/Readme_Supplements/self_supervised_1.png)
+![stage2_1](Images/Readme_Supplements/stage2_1.png)
 - sample2:
-![self_supervised_2](Images/Readme_Supplements/self_supervised_2.png)
-- loss(After 50 epochs)
-![loss_50_epoch](Images/Readme_Supplements/loss_50_epoch_supervised.png)
+![stage2_2](Images/Readme_Supplements/stage2_2.png)
+- sample3:
+![stage2_3](Images/Readme_Supplements/stage2_3.png)
+- loss after 200 epochs:
+![loss_200_epoch_stage3](Images/Readme_Supplements/stage2_loss_200_epoch.png)
+
+Stage3: Adding Edge Awarness, Run in Cluster for 200 epochs:
+- sample1:
+![stage3_1](Images/Readme_Supplements/stage3_1.png)
+- sample2:
+![stage3_2](Images/Readme_Supplements/stage3_2.png)
+- sample3:
+![stage3_3](Images/Readme_Supplements/stage3_3.png)
+- loss after 200 epochs:
+![loss_200_epoch_stage3](Images/Readme_Supplements/stage3_loss_200_epoch.png)
