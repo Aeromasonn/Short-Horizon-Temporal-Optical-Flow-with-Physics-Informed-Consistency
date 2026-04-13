@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 # =========================
 # Path setup
 # =========================
-project_root = os.path.abspath("..")
+project_root = os.path.abspath("../..")
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
@@ -49,11 +49,8 @@ CENTER_FRAME_IDX = 10
 BATCH_SIZE = 2
 
 VIS_SPLIT = 'training'
-
-# Visualization controls
-MAX_SAMPLES = 20          # total number of samples to save
-START_INDEX = 0           # global sample index to start from
-SAVE_INDIVIDUAL = True    # save one figure per sample
+VIS_NUM_BATCHES = 1
+VIS_SAMPLE_IDX = 0
 
 CHECKPOINT_PATH = Path('checkpoints/fullpipeline_v3_best.pth')
 OUTPUT_DIR = Path('visualization_outputs')
@@ -296,11 +293,8 @@ decoder.eval()
 # =========================
 # Visualization loop
 # =========================
-saved = 0
-global_sample_idx = 0
-
 for batch_idx, batch in enumerate(vis_loader):
-    if saved >= MAX_SAMPLES:
+    if batch_idx >= VIS_NUM_BATCHES:
         break
 
     imgs = batch['imgs'].to(device)
@@ -316,21 +310,8 @@ for batch_idx, batch in enumerate(vis_loader):
         )
 
     pred_flows = out['flows'].cpu()
-    batch_size = imgs.size(0)
 
-    for sample_idx in range(batch_size):
-        if global_sample_idx < START_INDEX:
-            global_sample_idx += 1
-            continue
+    save_path = OUTPUT_DIR / f'vis_batch{batch_idx:03d}_sample{VIS_SAMPLE_IDX:02d}.png'
+    visualize_batch_result(batch, pred_flows, sample_idx=VIS_SAMPLE_IDX, save_path=save_path)
 
-        if saved >= MAX_SAMPLES:
-            break
-
-        if SAVE_INDIVIDUAL:
-            save_path = OUTPUT_DIR / f'vis_batch{batch_idx:03d}_sample{sample_idx:02d}.png'
-            visualize_batch_result(batch, pred_flows, sample_idx=sample_idx, save_path=save_path)
-
-        saved += 1
-        global_sample_idx += 1
-
-print(f'Visualization finished. Saved {saved} sample(s) to {OUTPUT_DIR}.')
+print('Visualization finished.')

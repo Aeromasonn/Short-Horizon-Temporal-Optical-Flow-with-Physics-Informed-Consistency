@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 # =========================
 # Path setup
 # =========================
-project_root = os.path.abspath("..")
+project_root = os.path.abspath("../..")
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
