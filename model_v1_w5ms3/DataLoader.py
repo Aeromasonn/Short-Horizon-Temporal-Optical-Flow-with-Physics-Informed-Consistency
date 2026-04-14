@@ -185,7 +185,7 @@ class TempFlowDataset_disp(Dataset):
             if self.return_pair_only:
                 frame_indices = [frame_id, frame_id + 1]
             else:
-                start = frame_id - half
+                start = frame_id - half + 1
                 frame_indices = list(range(start, start + self.seq_len))
 
             img_paths = []

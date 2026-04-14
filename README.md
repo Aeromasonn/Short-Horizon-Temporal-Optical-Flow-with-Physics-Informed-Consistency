@@ -52,3 +52,6 @@ Stage3: Adding edge awareness loss. Trained in DKUCC for 200 epochs:
 ![stage3_3](Images/Readme_Supplements/stage3_3.png)
 - loss after 200 epochs:
 ![loss_200_epoch_stage3](Images/Readme_Supplements/stage3_loss_200_epoch.png)
+
+- supervised_predict example:
+![supervised_example_1](Images/Readme_Supplements/supervised_example_1.png)
