@@ -41,7 +41,7 @@ from model_v0_w4ms2.Decoders import FlowDecoder
 # =========================
 # Config
 # =========================
-DATA_ROOT = '../../Data'
+DATA_ROOT = '../../../Data'
 STATS_FILE = 'stats.json'
 CROP_SIZE = (352, 1216)
 SEQ_LEN = 4
@@ -216,6 +216,84 @@ def load_checkpoint(checkpoint_path, pair_encoder, visual_branch, motion_branch,
     if 'stats' in checkpoint and checkpoint['stats'] is not None:
         print(f"Checkpoint stats: {checkpoint['stats']}")
 
+def visualize_batch_result_centered(batch, pred_flows, sample_idx=0, save_path=None):
+    imgs = batch['imgs'][sample_idx]          # [4, 3, H, W]
+    gt_flow = batch['flow'][sample_idx]       # [2, H, W]
+    src_idx = batch['src_idx_in_seq']
+    t = int(src_idx[sample_idx].item())       # GT matches pred_flows[sample_idx, t]
+
+    # Convert images
+    img0 = tensor_img_to_np(imgs[0])
+    img1 = tensor_img_to_np(imgs[1])
+    img2 = tensor_img_to_np(imgs[2])
+    img3 = tensor_img_to_np(imgs[3])
+
+    # Convert predicted flows
+    pred0_rgb = flow_to_rgb(pred_flows[sample_idx, 0])
+    pred1_rgb = flow_to_rgb(pred_flows[sample_idx, 1])
+    pred2_rgb = flow_to_rgb(pred_flows[sample_idx, 2])
+
+    # GT and matched EPE
+    gt_rgb = flow_to_rgb(gt_flow)
+    matched_pred = pred_flows[sample_idx, t]
+    epe_map = compute_epe_map(matched_pred, gt_flow, None)
+
+    # Human-readable frame numbering, centered on GT pair
+    # If GT pair is tensor t->t+1, call that human frames 2->3
+    human_start = 2 - t
+    frame_labels = [
+        f'Frame {human_start + 0}',
+        f'Frame {human_start + 1}',
+        f'Frame {human_start + 2}',
+        f'Frame {human_start + 3}',
+    ]
+    flow_labels = [
+        f'Pred Flow {human_start + 0}→{human_start + 1}',
+        f'Pred Flow {human_start + 1}→{human_start + 2}',
+        f'Pred Flow {human_start + 2}→{human_start + 3}',
+    ]
+
+    fig, axes = plt.subplots(2, 4, figsize=(22, 10))
+
+    axes[0, 0].imshow(img0)
+    axes[0, 0].set_title(frame_labels[0])
+    axes[0, 0].axis('off')
+
+    axes[0, 1].imshow(img1)
+    axes[0, 1].set_title(frame_labels[1])
+    axes[0, 1].axis('off')
+
+    axes[0, 2].imshow(img2)
+    axes[0, 2].set_title(frame_labels[2])
+    axes[0, 2].axis('off')
+
+    axes[0, 3].imshow(img3)
+    axes[0, 3].set_title(frame_labels[3])
+    axes[0, 3].axis('off')
+
+    axes[1, 0].imshow(pred0_rgb)
+    axes[1, 0].set_title(flow_labels[0])
+    axes[1, 0].axis('off')
+
+    axes[1, 1].imshow(pred1_rgb)
+    axes[1, 1].set_title(flow_labels[1])
+    axes[1, 1].axis('off')
+
+    axes[1, 2].imshow(pred2_rgb)
+    axes[1, 2].set_title(flow_labels[2])
+    axes[1, 2].axis('off')
+
+    axes[1, 3].imshow(gt_rgb)
+    axes[1, 3].set_title(f'GT Flow ({human_start + t}→{human_start + t + 1})')
+    axes[1, 3].axis('off')
+
+    plt.tight_layout()
+
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches='tight', dpi=150)
+        print(f'Saved visualization to: {save_path}')
+
+    plt.close(fig)
 
 
 def visualize_batch_result(batch, pred_flows, sample_idx=0, save_path=None):
@@ -316,6 +394,7 @@ for batch_idx, batch in enumerate(vis_loader):
         )
 
     pred_flows = out['flows'].cpu()
+    print(pred_flows.shape)
     batch_size = imgs.size(0)
 
     for sample_idx in range(batch_size):
@@ -328,7 +407,7 @@ for batch_idx, batch in enumerate(vis_loader):
 
         if SAVE_INDIVIDUAL:
             save_path = OUTPUT_DIR / f'vis_batch{batch_idx:03d}_sample{sample_idx:02d}.png'
-            visualize_batch_result(batch, pred_flows, sample_idx=sample_idx, save_path=save_path)
+            visualize_batch_result_centered(batch, pred_flows, sample_idx=sample_idx, save_path=save_path)
 
         saved += 1
         global_sample_idx += 1
