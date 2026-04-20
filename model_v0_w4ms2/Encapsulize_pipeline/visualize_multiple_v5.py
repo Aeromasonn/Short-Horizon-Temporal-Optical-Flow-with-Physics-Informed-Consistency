@@ -51,8 +51,8 @@ VIS_SPLIT = 'training'
 MAX_SAMPLES = 20
 START_INDEX = 0
 
-CHECKPOINT_PATH = Path('checkpoints/fullpipeline_v12_best.pth')
-OUTPUT_DIR = Path('visualization_outputs_v12')
+CHECKPOINT_PATH = Path('checkpoints/fullpipeline_v5_best_400epoch.pth')
+OUTPUT_DIR = Path('visualization_outputs_v5_400epoch')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 

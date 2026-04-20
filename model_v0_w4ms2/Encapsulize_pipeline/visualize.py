@@ -41,7 +41,7 @@ from model_v0_w4ms2.Decoders import FlowDecoder
 # =========================
 # Config
 # =========================
-DATA_ROOT = '../../Data'
+DATA_ROOT = '../../../Data'
 STATS_FILE = 'stats.json'
 CROP_SIZE = (352, 1216)
 SEQ_LEN = 4
@@ -53,7 +53,7 @@ VIS_NUM_BATCHES = 1
 VIS_SAMPLE_IDX = 0
 
 CHECKPOINT_PATH = Path('checkpoints/fullpipeline_v3_best.pth')
-OUTPUT_DIR = Path('visualization_outputs')
+OUTPUT_DIR = Path('visualization_outputs_one')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -213,7 +213,30 @@ def load_checkpoint(checkpoint_path, pair_encoder, visual_branch, motion_branch,
     if 'stats' in checkpoint and checkpoint['stats'] is not None:
         print(f"Checkpoint stats: {checkpoint['stats']}")
 
+def save_full_sequence(batch, pred_flows, sample_idx=0, save_dir=None):
+    os.makedirs(save_dir, exist_ok=True)
 
+    imgs = batch['imgs'][sample_idx]  # [T, C, H, W]
+    gt_flow = batch['flow'][sample_idx]
+
+    # Convert frames
+    imgs_np = [tensor_img_to_np(img) for img in imgs]
+
+    # Save 4 frames
+    for i, img in enumerate(imgs_np):
+        plt.imsave(os.path.join(save_dir, f'frame_{i+1}.png'), img)
+
+    # Save predicted flows (1→2, 2→3, 3→4)
+    for i in range(pred_flows.shape[1]):
+        flow = pred_flows[sample_idx, i]
+        flow_rgb = flow_to_rgb(flow)
+        plt.imsave(os.path.join(save_dir, f'pred_flow_{i+1}_{i+2}.png'), flow_rgb)
+
+    # Save GT flow (you only have 2→3 currently)
+    gt_rgb = flow_to_rgb(gt_flow)
+    plt.imsave(os.path.join(save_dir, f'gt_flow_2_3.png'), gt_rgb)
+
+    print(f"Saved sequence to {save_dir}")
 
 def visualize_batch_result(batch, pred_flows, sample_idx=0, save_path=None):
     img_src = batch['img_src'][sample_idx]
@@ -311,7 +334,13 @@ for batch_idx, batch in enumerate(vis_loader):
 
     pred_flows = out['flows'].cpu()
 
-    save_path = OUTPUT_DIR / f'vis_batch{batch_idx:03d}_sample{VIS_SAMPLE_IDX:02d}.png'
-    visualize_batch_result(batch, pred_flows, sample_idx=VIS_SAMPLE_IDX, save_path=save_path)
+    save_dir = OUTPUT_DIR / f'batch{batch_idx:03d}_sample{VIS_SAMPLE_IDX:02d}'
+
+    save_full_sequence(
+        batch,
+        pred_flows,
+        sample_idx=VIS_SAMPLE_IDX,
+        save_dir=save_dir,
+    )
 
 print('Visualization finished.')

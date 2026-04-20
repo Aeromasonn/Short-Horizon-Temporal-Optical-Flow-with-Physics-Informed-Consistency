@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 
@@ -48,11 +49,14 @@ CENTER_FRAME_IDX = 10
 BATCH_SIZE = 2
 
 VIS_SPLIT = 'training'
-MAX_SAMPLES = 20
-START_INDEX = 0
 
-CHECKPOINT_PATH = Path('checkpoints/fullpipeline_v12_best.pth')
-OUTPUT_DIR = Path('visualization_outputs_v12')
+# Visualization controls
+MAX_SAMPLES = 20          # total number of samples to save
+START_INDEX = 0           # global sample index to start from
+SAVE_INDIVIDUAL = True    # save one figure per sample
+
+CHECKPOINT_PATH = Path('checkpoints/fullpipeline_v4_best.pth')
+OUTPUT_DIR = Path('visualization_outputs_v4')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -118,9 +122,9 @@ decoder = FlowDecoder(
 # =========================
 def forward_pipeline(imgs, pair_encoder, visual_branch, motion_branch, fusion, decoder):
     pair_out = pair_encoder(imgs)
-    pair_feats = pair_out["pair_feats"]
-    flow_inits = pair_out["flow_inits"]
-    corrs = pair_out["corrs"]
+    pair_feats = pair_out['pair_feats']
+    flow_inits = pair_out['flow_inits']
+    corrs = pair_out['corrs']
 
     visual_feats = visual_branch(imgs)
     motion_feats = motion_branch(pair_feats)
@@ -129,57 +133,43 @@ def forward_pipeline(imgs, pair_encoder, visual_branch, motion_branch, fusion, d
     flows = decoder(fused_seq)
 
     return {
-        "flows": flows,
-        "flow_inits": flow_inits,
-        "pair_feats": pair_feats,
-        "corrs": corrs,
-        "fused_seq": fused_seq,
+        'flows': flows,
+        'flow_inits': flow_inits,
+        'pair_feats': pair_feats,
+        'corrs': corrs,
+        'fused_seq': fused_seq,
     }
 
 
-import numpy as np
-import matplotlib.pyplot as plt
-import torch
-
 
 def flow_to_rgb(flow):
-    """
-    flow: torch.Tensor or np.ndarray of shape [2, H, W]
-    returns: np.ndarray [H, W, 3] in [0,1]
-    """
     if isinstance(flow, torch.Tensor):
         flow = flow.detach().cpu().numpy()
 
     u = flow[0]
     v = flow[1]
 
-    mag = np.sqrt(u**2 + v**2)
-    ang = np.arctan2(v, u)  # [-pi, pi]
+    mag = np.sqrt(u ** 2 + v ** 2)
+    ang = np.arctan2(v, u)
 
-    hue = (ang + np.pi) / (2 * np.pi)   # [0,1]
+    hue = (ang + np.pi) / (2 * np.pi)
     sat = np.ones_like(hue)
     val = mag / (np.max(mag) + 1e-6)
     val = np.clip(val, 0, 1)
 
     hsv = np.stack([hue, sat, val], axis=-1)
-
-    import matplotlib.colors as mcolors
     rgb = mcolors.hsv_to_rgb(hsv)
     return rgb
 
 
+
 def tensor_img_to_np(img):
-    """
-    img: [3, H, W], normalized or unnormalized
-    returns: [H, W, 3]
-    """
     if isinstance(img, torch.Tensor):
         img = img.detach().cpu()
 
     img = img.permute(1, 2, 0).numpy()
-
-    # simple min-max for display
     img_min, img_max = img.min(), img.max()
+
     if img_max > img_min:
         img = (img - img_min) / (img_max - img_min)
     else:
@@ -188,11 +178,8 @@ def tensor_img_to_np(img):
     return img
 
 
+
 def compute_epe_map(pred, gt, valid=None):
-    """
-    pred, gt: [2, H, W]
-    valid: [H, W] or None
-    """
     if isinstance(pred, torch.Tensor):
         pred = pred.detach().cpu()
     if isinstance(gt, torch.Tensor):
@@ -208,14 +195,12 @@ def compute_epe_map(pred, gt, valid=None):
 
     return epe.numpy()
 
+
+
 def select_gt_flow_single(pred_flows, src_idx, b=0):
-    """
-    pred_flows: [B, Tm, 2, H, W]
-    src_idx: [B]
-    b: sample index in batch
-    """
     t = int(src_idx[b].item())
     return pred_flows[b, t]
+
 
 
 def load_checkpoint(checkpoint_path, pair_encoder, visual_branch, motion_branch, fusion, decoder, device):
@@ -231,13 +216,91 @@ def load_checkpoint(checkpoint_path, pair_encoder, visual_branch, motion_branch,
     if 'stats' in checkpoint and checkpoint['stats'] is not None:
         print(f"Checkpoint stats: {checkpoint['stats']}")
 
+def visualize_batch_result_centered(batch, pred_flows, sample_idx=0, save_path=None):
+    imgs = batch['imgs'][sample_idx]          # [4, 3, H, W]
+    gt_flow = batch['flow'][sample_idx]       # [2, H, W]
+    src_idx = batch['src_idx_in_seq']
+    t = int(src_idx[sample_idx].item())       # GT matches pred_flows[sample_idx, t]
+
+    # Convert images
+    img0 = tensor_img_to_np(imgs[0])
+    img1 = tensor_img_to_np(imgs[1])
+    img2 = tensor_img_to_np(imgs[2])
+    img3 = tensor_img_to_np(imgs[3])
+
+    # Convert predicted flows
+    pred0_rgb = flow_to_rgb(pred_flows[sample_idx, 0])
+    pred1_rgb = flow_to_rgb(pred_flows[sample_idx, 1])
+    pred2_rgb = flow_to_rgb(pred_flows[sample_idx, 2])
+
+    # GT and matched EPE
+    gt_rgb = flow_to_rgb(gt_flow)
+    matched_pred = pred_flows[sample_idx, t]
+    epe_map = compute_epe_map(matched_pred, gt_flow, None)
+
+    # Human-readable frame numbering, centered on GT pair
+    # If GT pair is tensor t->t+1, call that human frames 2->3
+    human_start = 2 - t
+    frame_labels = [
+        f'Frame {human_start + 0}',
+        f'Frame {human_start + 1}',
+        f'Frame {human_start + 2}',
+        f'Frame {human_start + 3}',
+    ]
+    flow_labels = [
+        f'Pred Flow {human_start + 0}→{human_start + 1}',
+        f'Pred Flow {human_start + 1}→{human_start + 2}',
+        f'Pred Flow {human_start + 2}→{human_start + 3}',
+    ]
+
+    fig, axes = plt.subplots(2, 4, figsize=(22, 10))
+
+    axes[0, 0].imshow(img0)
+    axes[0, 0].set_title(frame_labels[0])
+    axes[0, 0].axis('off')
+
+    axes[0, 1].imshow(img1)
+    axes[0, 1].set_title(frame_labels[1])
+    axes[0, 1].axis('off')
+
+    axes[0, 2].imshow(img2)
+    axes[0, 2].set_title(frame_labels[2])
+    axes[0, 2].axis('off')
+
+    axes[0, 3].imshow(img3)
+    axes[0, 3].set_title(frame_labels[3])
+    axes[0, 3].axis('off')
+
+    axes[1, 0].imshow(pred0_rgb)
+    axes[1, 0].set_title(flow_labels[0])
+    axes[1, 0].axis('off')
+
+    axes[1, 1].imshow(pred1_rgb)
+    axes[1, 1].set_title(flow_labels[1])
+    axes[1, 1].axis('off')
+
+    axes[1, 2].imshow(pred2_rgb)
+    axes[1, 2].set_title(flow_labels[2])
+    axes[1, 2].axis('off')
+
+    axes[1, 3].imshow(gt_rgb)
+    axes[1, 3].set_title(f'GT Flow ({human_start + t}→{human_start + t + 1})')
+    axes[1, 3].axis('off')
+
+    plt.tight_layout()
+
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches='tight', dpi=150)
+        print(f'Saved visualization to: {save_path}')
+
+    plt.close(fig)
+
 
 def visualize_batch_result(batch, pred_flows, sample_idx=0, save_path=None):
-    img_src = batch["img_src"][sample_idx]
-    img_tgt = batch["img_tgt"][sample_idx]
-    gt_flow = batch["flow"][sample_idx]
-    valid = batch["valid"][sample_idx]
-    src_idx = batch["src_idx_in_seq"]
+    img_src = batch['img_src'][sample_idx]
+    img_tgt = batch['img_tgt'][sample_idx]
+    gt_flow = batch['flow'][sample_idx]
+    src_idx = batch['src_idx_in_seq']
 
     pred = select_gt_flow_single(pred_flows, src_idx, b=sample_idx)
 
@@ -250,24 +313,24 @@ def visualize_batch_result(batch, pred_flows, sample_idx=0, save_path=None):
     fig, axes = plt.subplots(1, 5, figsize=(22, 5))
 
     axes[0].imshow(img_src_np)
-    axes[0].set_title("Source Image")
-    axes[0].axis("off")
+    axes[0].set_title('Source Image')
+    axes[0].axis('off')
 
     axes[1].imshow(img_tgt_np)
-    axes[1].set_title("Target Image")
-    axes[1].axis("off")
+    axes[1].set_title('Target Image')
+    axes[1].axis('off')
 
     axes[2].imshow(pred_rgb)
-    axes[2].set_title("Predicted Flow")
-    axes[2].axis("off")
+    axes[2].set_title('Predicted Flow')
+    axes[2].axis('off')
 
     axes[3].imshow(gt_rgb)
-    axes[3].set_title("GT Flow")
-    axes[3].axis("off")
+    axes[3].set_title('GT Flow')
+    axes[3].axis('off')
 
-    im = axes[4].imshow(epe_map, cmap="inferno")
-    axes[4].set_title("EPE Map")
-    axes[4].axis("off")
+    im = axes[4].imshow(epe_map, cmap='inferno')
+    axes[4].set_title('EPE Map')
+    axes[4].axis('off')
     plt.colorbar(im, ax=axes[4], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
@@ -312,10 +375,13 @@ decoder.eval()
 # Visualization loop
 # =========================
 saved = 0
-seen = 0
+global_sample_idx = 0
 
 for batch_idx, batch in enumerate(vis_loader):
-    imgs = batch["imgs"].to(device)
+    if saved >= MAX_SAMPLES:
+        break
+
+    imgs = batch['imgs'].to(device)
 
     with torch.no_grad():
         out = forward_pipeline(
@@ -327,24 +393,23 @@ for batch_idx, batch in enumerate(vis_loader):
             decoder,
         )
 
-    pred_flows = out["flows"].cpu()
-    batch_size = pred_flows.shape[0]
+    pred_flows = out['flows'].cpu()
+    print(pred_flows.shape)
+    batch_size = imgs.size(0)
 
     for sample_idx in range(batch_size):
-        if seen < START_INDEX:
-            seen += 1
+        if global_sample_idx < START_INDEX:
+            global_sample_idx += 1
             continue
 
         if saved >= MAX_SAMPLES:
             break
 
-        save_path = OUTPUT_DIR / f'vis_batch{batch_idx:03d}_sample{sample_idx:02d}.png'
-        visualize_batch_result(batch, pred_flows, sample_idx=sample_idx, save_path=save_path)
+        if SAVE_INDIVIDUAL:
+            save_path = OUTPUT_DIR / f'vis_batch{batch_idx:03d}_sample{sample_idx:02d}.png'
+            visualize_batch_result_centered(batch, pred_flows, sample_idx=sample_idx, save_path=save_path)
 
         saved += 1
-        seen += 1
+        global_sample_idx += 1
 
-    if saved >= MAX_SAMPLES:
-        break
-
-print('Visualization finished.')
+print(f'Visualization finished. Saved {saved} sample(s) to {OUTPUT_DIR}.')

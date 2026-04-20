@@ -8,5 +8,5 @@ checkpoints_v2/
 *.pth
 
 # visualization outputs
-visualization_outputs/
-visualization_outputs_v2/
+# all visualization outputs
+visualization_outputs*/

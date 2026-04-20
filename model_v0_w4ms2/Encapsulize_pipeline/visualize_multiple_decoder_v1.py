@@ -32,9 +32,9 @@ from model_v0_w4ms2.Encoders_sobel_v1 import (
     SpatialTemporalFusion_timeAware,
 )
 
-import model_v0_w4ms2.Decoders as Decoders
+import model_v0_w4ms2.Decoder_v1 as Decoders
 importlib.reload(Decoders)
-from model_v0_w4ms2.Decoders import FlowDecoder
+from model_v0_w4ms2.Decoder_v1 import FlowDecoder
 
 
 # =========================
@@ -126,7 +126,7 @@ def forward_pipeline(imgs, pair_encoder, visual_branch, motion_branch, fusion, d
     motion_feats = motion_branch(pair_feats)
 
     fused_seq = fusion(visual_feats, motion_feats)
-    flows = decoder(fused_seq)
+    flows = decoder(fused_seq, imgs)
 
     return {
         "flows": flows,
