@@ -115,6 +115,30 @@ def masked_mean(x, mask=None, eps=1e-6):
 
     return (x * mask).sum() / (mask.sum() * (x.shape[1] if x.ndim == 4 else 1) + eps)
 
+def upsample_flow_to(flow, size_hw):
+    """
+    flow: [B, 2, h, w] in pixel units
+    size_hw: (H, W)
+    """
+    B, C, h, w = flow.shape
+    H, W = size_hw
+
+    if (h, w) == (H, W):
+        return flow
+
+    scale_y = H / h
+    scale_x = W / w
+
+    flow_up = F.interpolate(
+        flow,
+        size=(H, W),
+        mode="bilinear",
+        align_corners=False,
+    )
+    flow_up[:, 0] *= scale_x
+    flow_up[:, 1] *= scale_y
+    return flow_up
+
 def smoothness_loss_masked(flow, mask=None, edge_aware_img=None, eps=1e-6):
     """
     flow: [B,2,H,W]
@@ -165,6 +189,9 @@ def multi_frame_flow_loss(
     gt_flow,
     valid,
     src_idx,
+    flow_inits,
+    latent_del,
+    flow_res,
     img_src=None,
     img_tgt=None,
     lambda_epe=1.0,
@@ -173,15 +200,21 @@ def multi_frame_flow_loss(
     lambda_sm_valid=0.02,
     lambda_sm_invalid=0.10,
     lambda_mag_invalid=0.02,
+    lambda_flow_res=0.01,
+    lambda_init_improve=0.0,
+    lambda_latent_delta=0.001,
     use_edge_aware_smooth=True,
 ):
     """
-    pred_flows: [B,Tm,2,H,W]
-    gt_flow:    [B,2,H,W]
-    valid:      [B,H,W] or [B,1,H,W]
-    src_idx:    [B]
-    img_src:    [B,3,H,W] or None
-    img_tgt:    [B,3,H,W] or None
+    pred_flows:   [B, Tm, 2, H, W]
+    gt_flow:      [B, 2, H, W]
+    valid:        [B, H, W] or [B, 1, H, W]
+    src_idx:      [B]
+    flow_inits:   [B, Tm, 2, H, W]
+    refined_seq:  [B, Tm, C, H, W]   # currently unused directly
+    flow_res:     [B, Tm, 2, H, W]
+    img_src:      [B, 3, H, W] or None
+    img_tgt:      [B, 3, H, W] or None
 
     Returns:
         total_loss, loss_dict
@@ -189,37 +222,85 @@ def multi_frame_flow_loss(
     valid = _to_bhw_mask(valid)
     invalid = 1.0 - valid
 
-    pred_main = select_gt_flow(pred_flows, src_idx)  # [B,2,H,W]
+    # Select the flow aligned with GT supervision
+    pred_main = select_gt_flow(pred_flows, src_idx)      # [B,2,H,W]
+    init_main = select_gt_flow(flow_inits, src_idx)      # [B,2,H,W]
+    flow_res_main = select_gt_flow(flow_res, src_idx)    # [B,2,H,W]
 
+    # --------------------------------------------------
     # 1) supervised EPE on valid GT pixels
+    # --------------------------------------------------
     loss_epe = epe_loss(pred_main, gt_flow, valid)
 
+    # --------------------------------------------------
     # 2) optional photometric loss on valid pixels
+    # --------------------------------------------------
     if img_src is not None and img_tgt is not None:
         loss_photo = photometric_loss(img_src, img_tgt, pred_main, valid)
     else:
         loss_photo = pred_main.new_tensor(0.0)
 
+    # --------------------------------------------------
     # 3) temporal consistency across predicted flow sequence
+    # --------------------------------------------------
     loss_temp = temporal_loss(pred_flows)
 
+    # --------------------------------------------------
     # 4) spatial smoothness on valid pixels
+    # --------------------------------------------------
     edge_img = img_src if (use_edge_aware_smooth and img_src is not None) else None
     loss_sm_valid = smoothness_loss_masked(pred_main, valid, edge_aware_img=edge_img)
 
+    # --------------------------------------------------
     # 5) stronger smoothness on invalid pixels
+    # --------------------------------------------------
     loss_sm_invalid = smoothness_loss_masked(pred_main, invalid, edge_aware_img=edge_img)
 
+    # --------------------------------------------------
     # 6) small-flow prior on invalid pixels
+    # --------------------------------------------------
     loss_mag_invalid = flow_magnitude_loss(pred_main, invalid)
 
+    # --------------------------------------------------
+    # 7) residual-flow regularization
+    # Encourage decoder residual to stay small unless needed
+    # --------------------------------------------------
+    loss_flow_res = flow_magnitude_loss(flow_res_main, torch.ones_like(valid))
+
+    loss_latent_delta = latent_del.abs().mean()
+
+    # --------------------------------------------------
+    # 8) optional improvement-over-init term
+    #
+    # Compare current prediction EPE vs flow_init EPE.
+    # Penalize only if final prediction becomes WORSE than init.
+    # This is a soft "do no harm" term.
+    # --------------------------------------------------
+    if lambda_init_improve > 0.0:
+        init_main_up = upsample_flow_to(init_main, gt_flow.shape[-2:])
+
+        epe_pred_map = torch.norm(pred_main - gt_flow, dim=1)  # [B,H,W]
+        epe_init_map = torch.norm(init_main_up - gt_flow, dim=1)  # [B,H,W]
+
+        improve_penalty = F.relu(epe_pred_map - epe_init_map) * valid
+        denom = valid.sum() + 1e-6
+        loss_init_improve = improve_penalty.sum() / denom
+    else:
+        loss_init_improve = pred_main.new_tensor(0.0)
+
+    # --------------------------------------------------
+    # Total
+    # --------------------------------------------------
     total = (
         lambda_epe * loss_epe +
         lambda_photo * loss_photo +
         lambda_temp * loss_temp +
         lambda_sm_valid * loss_sm_valid +
         lambda_sm_invalid * loss_sm_invalid +
-        lambda_mag_invalid * loss_mag_invalid
+        lambda_mag_invalid * loss_mag_invalid +
+        lambda_flow_res * loss_flow_res +
+        lambda_latent_delta * loss_latent_delta +
+        lambda_init_improve * loss_init_improve
     )
 
     loss_dict = {
@@ -227,9 +308,12 @@ def multi_frame_flow_loss(
         "flow": loss_epe.detach(),
         "self": loss_photo.detach(),
         "temp": loss_temp.detach(),
-        "smooth_masked": loss_sm_valid.detach(),
+        "smooth_valid": loss_sm_valid.detach(),
         "smooth_inv": loss_sm_invalid.detach(),
-        "magnitude": loss_mag_invalid.detach(),
+        "magnitude_inv": loss_mag_invalid.detach(),
+        "flow_res": loss_flow_res.detach(),
+        "latent_delta": loss_latent_delta.detach(),
+        "init_improve": loss_init_improve.detach(),
     }
 
     return total, loss_dict
