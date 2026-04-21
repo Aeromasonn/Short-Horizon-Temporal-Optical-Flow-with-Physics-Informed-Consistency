@@ -55,3 +55,33 @@ Stage3: Adding edge awareness loss. Trained in DKUCC for 200 epochs:
 
 - supervised_predict example:
 ![supervised_example1](Images/Readme_Supplements/supervised_example1.png)
+
+Two Promissing 400 epoch training outcome
+
+1. Version5, with edge-aware loss function, weighted EPE, after 400 epochs training.
+
+- Example1:
+![sample_1](Images/Readme_Supplements/v5_sample1.png)
+- Example2:
+![sample_2](Images/Readme_Supplements/v5_sample2.png)
+- Example3:
+![sample_3](Images/Readme_Supplements/v5_sample3.png)
+
+Looks have better performance on Sky (Magnitude)
+
+- loss(After 400 epochs)
+![loss_50_epoch](Images/Readme_Supplements/v5_loss_400epoch.png)
+
+2. Version12, base on Version5, add 1: refinement stage in decoder 2:added boundary-related supervision; added a sky-related auxiliary term; change lamda settings of temperol loss from 0.1 to 0.03
+
+- Example1:
+![sample_1](Images/Readme_Supplements/v12_sample1.png)
+- Example2:
+![sample_2](Images/Readme_Supplements/v12_sample2.png)
+- Example3:
+![sample_3](Images/Readme_Supplements/v12_sample3.png)
+
+- loss(After 400 epochs)
+![loss_50_epoch](Images/Readme_Supplements/v12_loss_400epoch.png)
+
+Looks much better in edge detection, but don't know why the sky is even worse even Sky loss is introduced
