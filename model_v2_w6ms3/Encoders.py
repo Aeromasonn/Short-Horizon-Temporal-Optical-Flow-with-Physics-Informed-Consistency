@@ -373,6 +373,7 @@ class SpatialTemporalFusion_timeAware(nn.Module):
 
 
 # ---------------------------------------------------
+# Compatible with FullPipeline_v1.6
 # Better time-aware UNO input
 # Build 2D UNO input by stacking time into channels
 # ---------------------------------------------------
@@ -449,3 +450,156 @@ class UNOLatentResidualHead(nn.Module):
         delta = self.out_proj(uno_feat)
         delta = delta.view(B, Tm, self.latent_ch, H, W)
         return delta
+
+# ---------------------------------------------------
+# Compatible with FullPipeline_v1.7
+# Better time-aware UNO input
+# Build 2D UNO input for integrating with pairwise encoder modules
+# ---------------------------------------------------
+
+def build_pair_uno_input(pair_feats, flow_inits=None, valid_mask=None, use_flow=False, use_grads=False):
+    """
+    Build UNO input for pairwise motion refinement.
+
+    Input:
+        pair_feats : [B, Tm, Cp, H, W]
+        flow_inits : [B, Tm, 2,  H, W] or None
+        valid_mask : [B, 1, H, W] or None
+        use_flow   : whether to append flow_inits per timestep
+        use_grads  : whether to append spatial grads of flow_inits per timestep
+
+    Output:
+        uno_in : [B, C_stack, H, W]
+
+    Experiment Plan:
+        v1: use_flow=False, use_grads=False   -> pair_feats only
+        v2: use_flow=True,  use_grads=False   -> pair_feats + flow_inits
+        v3: use_flow=True,  use_grads=True    -> pair_feats + flow_inits + grads
+    """
+    B, Tm, Cp, H, W = pair_feats.shape
+
+    step_feats = [pair_feats]  # [B, Tm, Cp, H, W]
+
+    if use_flow:
+        if flow_inits is None:
+            raise ValueError("flow_inits is required when use_flow=True")
+        assert flow_inits.shape[:2] == (B, Tm), f"flow_inits shape mismatch: {flow_inits.shape}"
+        assert flow_inits.shape[2] == 2, f"Expected flow_inits channel=2, got {flow_inits.shape[2]}"
+        assert flow_inits.shape[3:] == (H, W), f"Spatial mismatch: {flow_inits.shape[3:]} vs {(H, W)}"
+        step_feats.append(flow_inits)
+
+        if use_grads:
+            grad_x, grad_y = flow_spatial_grads(flow_inits)  # each [B, Tm, 2, H, W]
+            step_feats.append(grad_x)
+            step_feats.append(grad_y)
+
+    step = torch.cat(step_feats, dim=2)  # [B, Tm, Cstep, H, W]
+    step = step.permute(0, 2, 1, 3, 4).contiguous()  # [B, Cstep, Tm, H, W]
+    uno_in = step.view(B, -1, H, W)  # stack time into channels
+
+    if valid_mask is not None:
+        assert valid_mask.shape == (B, 1, H, W), f"Expected valid_mask [B,1,H,W], got {valid_mask.shape}"
+        uno_in = torch.cat([uno_in, valid_mask], dim=1)
+
+    return uno_in
+
+class PairwiseUNOResidualHead(nn.Module):
+    """
+    Map UNO output back to pairwise motion residuals.
+
+    Input:
+        uno_feat : [B, out_ch, H, W]
+
+    Output:
+        delta_pair_feats : [B, Tm, pair_ch, H, W]
+    """
+    def __init__(self, out_ch, pair_ch, num_pairs):
+        super().__init__()
+        self.out_ch = out_ch
+        self.pair_ch = pair_ch
+        self.num_pairs = num_pairs
+
+        self.out_proj = nn.Sequential(
+            ConvBlock(out_ch, out_ch, k=3, s=1, p=1),
+            nn.Conv2d(out_ch, pair_ch * num_pairs, kernel_size=1, stride=1, padding=0)
+        )
+
+    def forward(self, uno_feat, B, Tm, H, W):
+        delta = self.out_proj(uno_feat)              # [B, Tm*pair_ch, H, W]
+        delta = delta.view(B, Tm, self.pair_ch, H, W)
+        return delta
+
+class PairwiseMotionRefiner(nn.Module):
+    """
+    Residual operator refinement on pairwise motion embeddings.
+
+    Pipeline:
+        pair_feats -> build_pair_uno_input -> UNO -> residual head -> refined_pair_feats
+
+    Intended use:
+        refined_pair_feats = PairwiseMotionRefiner(...)(pair_feats, flow_inits, valid_lowres)
+        motion_feats = motion_branch(refined_pair_feats)
+    """
+    def __init__(
+        self,
+        uno_module,
+        out_ch=128,
+        pair_ch=128,
+        num_pairs=3,
+        use_flow=False,
+        use_grads=False,
+        use_valid=True,
+    ):
+        super().__init__()
+        self.uno = uno_module
+        self.use_flow = use_flow
+        self.use_grads = use_grads
+        self.use_valid = use_valid
+
+        self.residual_head = PairwiseUNOResidualHead(
+            out_ch=out_ch,
+            pair_ch=pair_ch,
+            num_pairs=num_pairs,
+        )
+
+    def forward(self, pair_feats, flow_inits=None, valid_mask=None):
+        """
+        Input:
+            pair_feats : [B, Tm, Cp, H, W]
+            flow_inits : [B, Tm, 2, H, W] or None
+            valid_mask : [B, 1, H, W] or None
+
+        Output:
+            refined_pair_feats : [B, Tm, Cp, H, W]
+            pair_uno_input     : [B, C_stack, H, W]
+            pair_uno_feat      : [B, out_ch, H, W]
+            delta_pair_feats   : [B, Tm, Cp, H, W]
+        """
+        B, Tm, Cp, H, W = pair_feats.shape
+
+        pair_uno_input = build_pair_uno_input(
+            pair_feats=pair_feats,
+            flow_inits=flow_inits,
+            valid_mask=valid_mask if self.use_valid else None,
+            use_flow=self.use_flow,
+            use_grads=self.use_grads,
+        )
+
+        pair_uno_feat = self.uno(pair_uno_input)
+        delta_pair_feats = self.residual_head(
+            pair_uno_feat,
+            B=B,
+            Tm=Tm,
+            H=H,
+            W=W,
+        )
+
+        refined_pair_feats = pair_feats + delta_pair_feats
+
+        return {
+            "refined_pair_feats": refined_pair_feats,
+            "pair_uno_input": pair_uno_input,
+            "pair_uno_feat": pair_uno_feat,
+            "delta_pair_feats": delta_pair_feats,
+        }
+
