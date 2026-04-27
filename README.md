@@ -85,3 +85,6 @@ Looks have better performance on Sky (Magnitude)
 ![loss_50_epoch](Images/Readme_Supplements/v12_loss_400epoch.png)
 
 Looks much better in edge detection, but don't know why the sky is even worse even Sky loss is introduced
+
+Best So Far (v24, 570 epochs)
+![sample_3](Images/Readme_Supplements/best.png)

@@ -10,3 +10,7 @@ checkpoints_v2/
 # visualization outputs
 # all visualization outputs
 visualization_outputs*/
+runs/
+
+__pycache__/
+*.pyc
