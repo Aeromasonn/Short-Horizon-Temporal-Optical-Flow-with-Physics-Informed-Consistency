@@ -189,11 +189,17 @@ def multi_frame_flow_loss(
     gt_flow,
     valid,
     src_idx,
-    flow_inits,
-    latent_del,
-    flow_res,
+
+    # optional inputs (for different versions)
+    flow_inits=None,
+    flow_res=None,
+    latent_del=None,
+    pair_delta=None,
+
     img_src=None,
     img_tgt=None,
+
+    # weights
     lambda_epe=1.0,
     lambda_photo=0.05,
     lambda_temp=0.1,
@@ -201,96 +207,95 @@ def multi_frame_flow_loss(
     lambda_sm_invalid=0.10,
     lambda_mag_invalid=0.02,
     lambda_flow_res=0.01,
+
+    # optional regularizations (default OFF)
     lambda_init_improve=0.0,
-    lambda_latent_delta=0.001,
+    lambda_latent_delta=0.0,
+    lambda_pair_delta=0.0,
+
     use_edge_aware_smooth=True,
 ):
     """
-    pred_flows:   [B, Tm, 2, H, W]
-    gt_flow:      [B, 2, H, W]
-    valid:        [B, H, W] or [B, 1, H, W]
-    src_idx:      [B]
-    flow_inits:   [B, Tm, 2, H, W]
-    refined_seq:  [B, Tm, C, H, W]   # currently unused directly
-    flow_res:     [B, Tm, 2, H, W]
-    img_src:      [B, 3, H, W] or None
-    img_tgt:      [B, 3, H, W] or None
+    Supports:
+      - baseline (no UNO)
+      - post-fusion UNO (latent_del)
+      - pairwise UNO (pair_delta)
 
-    Returns:
-        total_loss, loss_dict
+    All optional terms are gated by:
+      (tensor is not None) AND (lambda > 0)
     """
+
     valid = _to_bhw_mask(valid)
     invalid = 1.0 - valid
 
-    # Select the flow aligned with GT supervision
-    pred_main = select_gt_flow(pred_flows, src_idx)      # [B,2,H,W]
-    init_main = select_gt_flow(flow_inits, src_idx)      # [B,2,H,W]
-    flow_res_main = select_gt_flow(flow_res, src_idx)    # [B,2,H,W]
+    pred_main = select_gt_flow(pred_flows, src_idx)
 
-    # --------------------------------------------------
-    # 1) supervised EPE on valid GT pixels
-    # --------------------------------------------------
+    # optional selects
+    init_main = select_gt_flow(flow_inits, src_idx) if flow_inits is not None else None
+    flow_res_main = select_gt_flow(flow_res, src_idx) if flow_res is not None else None
+
+    # -------------------------
+    # core losses
+    # -------------------------
     loss_epe = epe_loss(pred_main, gt_flow, valid)
 
-    # --------------------------------------------------
-    # 2) optional photometric loss on valid pixels
-    # --------------------------------------------------
     if img_src is not None and img_tgt is not None:
         loss_photo = photometric_loss(img_src, img_tgt, pred_main, valid)
     else:
         loss_photo = pred_main.new_tensor(0.0)
 
-    # --------------------------------------------------
-    # 3) temporal consistency across predicted flow sequence
-    # --------------------------------------------------
     loss_temp = temporal_loss(pred_flows)
 
-    # --------------------------------------------------
-    # 4) spatial smoothness on valid pixels
-    # --------------------------------------------------
     edge_img = img_src if (use_edge_aware_smooth and img_src is not None) else None
     loss_sm_valid = smoothness_loss_masked(pred_main, valid, edge_aware_img=edge_img)
-
-    # --------------------------------------------------
-    # 5) stronger smoothness on invalid pixels
-    # --------------------------------------------------
     loss_sm_invalid = smoothness_loss_masked(pred_main, invalid, edge_aware_img=edge_img)
 
-    # --------------------------------------------------
-    # 6) small-flow prior on invalid pixels
-    # --------------------------------------------------
     loss_mag_invalid = flow_magnitude_loss(pred_main, invalid)
 
-    # --------------------------------------------------
-    # 7) residual-flow regularization
-    # Encourage decoder residual to stay small unless needed
-    # --------------------------------------------------
-    loss_flow_res = flow_magnitude_loss(flow_res_main, torch.ones_like(valid))
+    # -------------------------
+    # optional: flow residual
+    # -------------------------
+    if flow_res_main is not None and lambda_flow_res > 0:
+        loss_flow_res = flow_magnitude_loss(flow_res_main, torch.ones_like(valid))
+    else:
+        loss_flow_res = pred_main.new_tensor(0.0)
 
-    loss_latent_delta = latent_del.abs().mean()
+    # -------------------------
+    # optional: post-fusion UNO
+    # -------------------------
+    if latent_del is not None and lambda_latent_delta > 0:
+        loss_latent_delta = latent_del.abs().mean()
+    else:
+        loss_latent_delta = pred_main.new_tensor(0.0)
 
-    # --------------------------------------------------
-    # 8) optional improvement-over-init term
-    #
-    # Compare current prediction EPE vs flow_init EPE.
-    # Penalize only if final prediction becomes WORSE than init.
-    # This is a soft "do no harm" term.
-    # --------------------------------------------------
-    if lambda_init_improve > 0.0:
+    # -------------------------
+    # optional: pairwise UNO
+    # -------------------------
+    if pair_delta is not None and lambda_pair_delta > 0:
+        loss_pair_delta = pair_delta.abs().mean()
+    else:
+        loss_pair_delta = pred_main.new_tensor(0.0)
+
+    # -------------------------
+    # optional: init-improve
+    # -------------------------
+    if (
+        flow_inits is not None
+        and lambda_init_improve > 0.0
+    ):
         init_main_up = upsample_flow_to(init_main, gt_flow.shape[-2:])
 
-        epe_pred_map = torch.norm(pred_main - gt_flow, dim=1)  # [B,H,W]
-        epe_init_map = torch.norm(init_main_up - gt_flow, dim=1)  # [B,H,W]
+        epe_pred = torch.norm(pred_main - gt_flow, dim=1)
+        epe_init = torch.norm(init_main_up - gt_flow, dim=1)
 
-        improve_penalty = F.relu(epe_pred_map - epe_init_map) * valid
-        denom = valid.sum() + 1e-6
-        loss_init_improve = improve_penalty.sum() / denom
+        penalty = F.relu(epe_pred - epe_init) * valid
+        loss_init_improve = penalty.sum() / (valid.sum() + 1e-6)
     else:
         loss_init_improve = pred_main.new_tensor(0.0)
 
-    # --------------------------------------------------
-    # Total
-    # --------------------------------------------------
+    # -------------------------
+    # total
+    # -------------------------
     total = (
         lambda_epe * loss_epe +
         lambda_photo * loss_photo +
@@ -300,19 +305,21 @@ def multi_frame_flow_loss(
         lambda_mag_invalid * loss_mag_invalid +
         lambda_flow_res * loss_flow_res +
         lambda_latent_delta * loss_latent_delta +
+        lambda_pair_delta * loss_pair_delta +
         lambda_init_improve * loss_init_improve
     )
 
     loss_dict = {
-        "Total Loss": total.detach(),
+        "Total": total.detach(),
         "flow": loss_epe.detach(),
-        "self": loss_photo.detach(),
+        "photo": loss_photo.detach(),
         "temp": loss_temp.detach(),
-        "smooth_valid": loss_sm_valid.detach(),
-        "smooth_inv": loss_sm_invalid.detach(),
-        "magnitude_inv": loss_mag_invalid.detach(),
+        "sm_valid": loss_sm_valid.detach(),
+        "sm_inv": loss_sm_invalid.detach(),
+        "mag_inv": loss_mag_invalid.detach(),
         "flow_res": loss_flow_res.detach(),
         "latent_delta": loss_latent_delta.detach(),
+        "pair_delta": loss_pair_delta.detach(),
         "init_improve": loss_init_improve.detach(),
     }
 
