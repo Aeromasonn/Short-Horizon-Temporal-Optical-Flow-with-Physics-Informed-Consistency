@@ -52,17 +52,26 @@ To train the Late Integration Architechure, run:
 ```
 python train.py --config config.json --architecture_type later
 ```
+To visualize single frame result (example: Late Integration) with EPE map, run:
+```
+python visualization.py --config config.json --checkpoint checkpoints/fullpipeline_later_best.pth --architecture_type later --mode single
+```
+To visualize short-horizon multiple frames result, run:
+```
+python visualization.py --config config.json --checkpoint checkpoints/fullpipeline_later_best.pth --architecture_type later --mode multiple
+```
+To use other architectures, simply replace `later` with `early` or `standalone` in both `--checkpoint` and `--architecture_type`.
 
 **Example Results**
 We evaluate the performance of three architecture variants under the same training and experimental settings on KITTI 2025 training set. The comparison focuses on standard optical flow metrics, including End-Point Error (EPE), per-image EPE (F1-EPE), and outlier ratio (F1-all%).
 
-| Model Variant        | EPE ↓  | F1-EPE ↓ | F1-all% ↓ |
-|---------------------|--------|----------|-----------|
-| Standalone          | 2.9234 | 2.7889   | **20.59** |
-| Early Integration   | —      | **2.5596** | 22.11     |
-| Late Integration    | 2.7647 | 2.6673   | 23.30     |
+| Model Variant        | EPE ↓    | F1-EPE ↓ | F1-all% ↓ |
+|---------------------|----------|----------|-----------|
+| Standalone          | 2.9234   | 2.7889   | **20.59** |
+| Early Integration   | **2.6255** | **2.5596** | 22.11     |
+| Late Integration    | 2.7647   | 2.6673   | 23.30     |
 
 Below is a optical flow predictions for the Standalone variant. Row 1, figures 1 and 2 (left to right) are target images; row 1, figure 3, is the estimated flow; row 2, figure 1 the ground truth flow; row 2, figure 2 is the EPE map of our estimation.
-![Standalone](Images/Readme_Supplements/Seperate.png)
+![Standalone](Images/Readme_Supplements/Standalone_UNO.png)
 Here is also an example of our short-horizon multiple prediction using the Standalone UNO Architechure: 
 ![Standalone_multiple](Images/Readme_Supplements/Standalone_Multiple.png)
