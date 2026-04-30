@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from My.Encoder_sober import *
@@ -377,17 +378,6 @@ def flow_detection_forward_pipeline(
         "det_out": det_out,
     }
 
-# train_flow_detector.py
-
-import torch
-from tqdm import tqdm
-
-
-# train_flow_detector.py
-
-import torch
-from tqdm import tqdm
-
 
 class FlowDetectionTrainer:
     def __init__(
@@ -402,6 +392,7 @@ class FlowDetectionTrainer:
         use_mag=True,
         use_valid=False,
         freeze_flow=True,
+        use_gtFlow_for_training=False,
     ):
         self.flow_modules = flow_modules
         self.detector = detector
@@ -414,6 +405,7 @@ class FlowDetectionTrainer:
         self.use_mag = use_mag
         self.use_valid = use_valid
         self.freeze_flow = freeze_flow
+        self.use_gt = use_gtFlow_for_training
 
         self.detector.to(device)
 
@@ -467,18 +459,29 @@ class FlowDetectionTrainer:
                 )
 
             pred_flows = flow_out["flows"]  # [B, Tm, 2, H, W]
+            gt_flows = batch["flow"]
 
             # --------------------------------------------------
             # 2. Build detector input
-            #    This must be outside no_grad.
+            #    - With pred flow or GT flow
             # --------------------------------------------------
-            flow_x = build_flow_detector_input(
-                pred_flows=pred_flows,
-                valid=valid,
-                flow_index=self.flow_index,
-                use_mag=self.use_mag,
-                use_valid=self.use_valid,
-            )
+            if self.use_gt:
+                gt_flows = gt_flows.to(self.device)
+                flow_x = build_flow_detector_input(
+                    pred_flows=gt_flows.unsqueeze(1),
+                    valid=valid,
+                    flow_index=self.flow_index,
+                    use_mag=self.use_mag,
+                    use_valid=self.use_valid,
+                )
+            else:
+                flow_x = build_flow_detector_input(
+                    pred_flows=pred_flows,
+                    valid=valid,
+                    flow_index=self.flow_index,
+                    use_mag=self.use_mag,
+                    use_valid=self.use_valid,
+                )
 
             det_images = [x for x in flow_x]
 

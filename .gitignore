@@ -1,7 +1,7 @@
 .idea
 Data
 */__pycache__/
-model_v2_w6ms3/My
+*/My
 runs
 */runs
 */ckpts
@@ -15,3 +15,4 @@ checkpoints_v2/
 visualization_outputs/
 visualization_outputs_v2/
 */preds
+My

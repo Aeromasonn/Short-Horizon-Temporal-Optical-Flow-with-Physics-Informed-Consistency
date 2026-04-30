@@ -8,23 +8,19 @@ from neuralop_seg.uno import UNO
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 import math
 import random
 import argparse
-import argparse
 import json
-import random
 import sys
 from pathlib import Path
-from typing import Any, Dict
-from typing import List, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import os
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 from tqdm import tqdm
-from torch.utils.tensorboard import SummaryWriter
 
 import torchvision
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
@@ -34,9 +30,14 @@ from My.Encoder_sober import *
 THIS_DIR = Path(__file__).resolve().parent
 MODULE_DIR = THIS_DIR.parent
 
+
+# ============================================================
+# Args / config
+# ============================================================
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="v22: v21 + UPFlow/UnFlow-style hard forward-backward photometric mask"
+        description="Inference-only flow-object detector. Loads flow ckpt + detector ckpt and saves prediction PNGs."
     )
     parser.add_argument(
         "--config",
@@ -44,9 +45,39 @@ def parse_args():
         default=str(THIS_DIR / "v22_hard_fbmask_config.json"),
         help="Path to the experiment config JSON.",
     )
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument(
+        "--flow_ckpt",
+        type=str,
+        default="My/fullpipeline_v22_best.pth",
+        help="Checkpoint for the optical-flow pipeline.",
+    )
+    parser.add_argument(
+        "--detector_ckpt",
+        type=str,
+        default="ckpts/detector_epoch_050.pt",
+        help="Checkpoint for the downstream Faster R-CNN detector.",
+    )
+    parser.add_argument(
+        "--out_dir",
+        type=str,
+        default="preds",
+        help="Directory to save prediction visualizations.",
+    )
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--num_workers", type=int, default=None)
+    parser.add_argument("--max_batches", type=int, default=None)
+    parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument("--flow_index", type=int, default=1)
+    parser.add_argument("--score_thresh", type=float, default=0.5)
+    parser.add_argument("--use_mag", action="store_true", default=True)
+    parser.add_argument("--no_mag", dest="use_mag", action="store_false")
+    parser.add_argument("--use_valid", action="store_true", default=False)
+    parser.add_argument(
+        "--save_gt",
+        action="store_true",
+        default=False,
+        help="If set, save a two-row GT + prediction visualization. Otherwise save prediction-only PNGs.",
+    )
     return parser.parse_args()
 
 
@@ -55,32 +86,14 @@ def load_config(path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def apply_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
-    if args.epochs is not None:
-        cfg["train"]["num_epochs"] = args.epochs
-    if args.batch_size is not None:
-        cfg["train"]["batch_size"] = args.batch_size
-    if args.lr is not None:
-        cfg["train"]["lr"] = args.lr
-    return cfg
-
-def save_detector_ckpt(save_path, epoch, detector, optimizer=None):
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-    ckpt = {
-        "epoch": epoch,
-        "detector_state_dict": detector.state_dict(),
-    }
-
-    if optimizer is not None:
-        ckpt["optimizer_state_dict"] = optimizer.state_dict()
-
-    torch.save(ckpt, save_path)
-    print(f"[CKPT] saved detector checkpoint to: {save_path}")
-
 def set_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
+
+
+# ============================================================
+# Dataset utilities
+# ============================================================
 
 def read_rgb_img(path):
     img = cv2.imread(str(path))
@@ -123,7 +136,6 @@ def read_obj_map(path):
     obj = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if obj is None:
         raise FileNotFoundError(f"Object map not found: {path}")
-
     return obj.astype(np.int32)
 
 
@@ -139,24 +151,12 @@ def center_crop(arr, crop_size):
 
     if arr.ndim == 3:
         return arr[top:top + crop_h, left:left + crop_w, :]
-    elif arr.ndim == 2:
+    if arr.ndim == 2:
         return arr[top:top + crop_h, left:left + crop_w]
-    else:
-        raise RuntimeError(f"Unexpected arr.ndim={arr.ndim}")
+    raise RuntimeError(f"Unexpected arr.ndim={arr.ndim}")
 
 
 def obj_map_to_boxes(obj_map, min_area=20, return_masks=False):
-    """
-    obj_map:
-        [H,W], integer instance id map
-
-    Returns detection target:
-        boxes:  [N,4], xyxy
-        labels: [N], all ones
-        obj_ids:[N]
-        optional masks: [N,H,W]
-    """
-
     boxes = []
     labels = []
     obj_ids = []
@@ -227,19 +227,10 @@ class TempFlowDataset_ObjMap(Dataset):
     """
     KITTI Flow / Scene Flow dataset with aligned obj_map labels.
 
-    Uses:
-        Additional_frames/training/image_2/000000_08.png ...
-        Flow/training/flow_occ/000000_10.png
-        Flow/training/obj_map/000000_10.png
-
-    Output:
-        imgs:          [T,3,H,W]
-        flow:          [2,H,W]
-        valid:         [H,W]
-        label:         dict with boxes/labels/obj_ids
-        seq_id:        str, e.g. "000000"
-        flow_frame:    long, usually 10
-        frame_indices: [T]
+    Also returns:
+        sample_idx: original dataset index
+        image_ids: e.g. ["000000_09", "000000_10", ...]
+        src_img_id / tgt_img_id when available
     """
 
     def __init__(
@@ -274,28 +265,20 @@ class TempFlowDataset_ObjMap(Dataset):
         self.return_masks = return_masks
         self.require_obj_map = require_obj_map
 
-        self.additional_frames_dir = (
-            self.root / "Additional_frames" / split / image_folder
-        )
-
+        self.additional_frames_dir = self.root / "Additional_frames" / split / image_folder
         self.flow_dir = self.root / "Flow" / split / flow_type
         self.obj_map_dir = self.root / "Flow" / split / "obj_map"
-
         self.disp0_dir = self.root / "Flow" / split / f"{disp_type}_0"
         self.disp1_dir = self.root / "Flow" / split / f"{disp_type}_1"
 
         if not self.additional_frames_dir.exists():
             raise FileNotFoundError(f"Missing image folder: {self.additional_frames_dir}")
-
         if not self.flow_dir.exists():
             raise FileNotFoundError(f"Missing flow folder: {self.flow_dir}")
-
         if self.require_obj_map and not self.obj_map_dir.exists():
             raise FileNotFoundError(f"Missing obj_map folder: {self.obj_map_dir}")
-
         if not self.disp0_dir.exists():
             raise FileNotFoundError(f"Missing disparity folder: {self.disp0_dir}")
-
         if not self.disp1_dir.exists():
             raise FileNotFoundError(f"Missing disparity folder: {self.disp1_dir}")
 
@@ -309,11 +292,10 @@ class TempFlowDataset_ObjMap(Dataset):
     def _build_samples(self):
         flow_files = sorted(self.flow_dir.glob("*.png"))
         samples = []
-
         half = self.seq_len // 2
 
         for flow_path in flow_files:
-            stem = flow_path.stem          # e.g. 000030_10
+            stem = flow_path.stem
             seq_id, frame_str = stem.split("_")
             flow_frame = int(frame_str)
 
@@ -324,22 +306,19 @@ class TempFlowDataset_ObjMap(Dataset):
                 frame_indices = list(range(start, start + self.seq_len))
 
             img_paths = []
-
             valid_sample = True
+
             for t in frame_indices:
                 img_path = self.additional_frames_dir / f"{seq_id}_{t:02d}.png"
-
                 if not img_path.exists():
                     valid_sample = False
                     break
-
                 img_paths.append(str(img_path))
 
             if not valid_sample:
                 continue
 
             obj_map_path = self.obj_map_dir / f"{seq_id}_{flow_frame:02d}.png"
-
             if self.require_obj_map and not obj_map_path.exists():
                 continue
 
@@ -355,6 +334,7 @@ class TempFlowDataset_ObjMap(Dataset):
                 "flow_frame": flow_frame,
                 "frame_indices": frame_indices,
                 "img_paths": img_paths,
+                "image_ids": [f"{seq_id}_{t:02d}" for t in frame_indices],
                 "flow_path": str(flow_path),
                 "obj_map_path": str(obj_map_path),
                 "disp0_path": str(disp0_path),
@@ -384,7 +364,6 @@ class TempFlowDataset_ObjMap(Dataset):
         channel_sum = np.zeros(3, dtype=np.float64)
         channel_sq_sum = np.zeros(3, dtype=np.float64)
         pixel_count = 0
-
         seen = set()
 
         for sample in self.samples:
@@ -393,7 +372,6 @@ class TempFlowDataset_ObjMap(Dataset):
                     continue
 
                 seen.add(img_path)
-
                 img = read_rgb_img(img_path)
 
                 if self.crop_size is not None:
@@ -401,7 +379,6 @@ class TempFlowDataset_ObjMap(Dataset):
 
                 h, w, _ = img.shape
                 flat = img.reshape(-1, 3)
-
                 channel_sum += flat.sum(axis=0)
                 channel_sq_sum += (flat ** 2).sum(axis=0)
                 pixel_count += h * w
@@ -427,7 +404,6 @@ class TempFlowDataset_ObjMap(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-
         imgs = []
 
         for img_path in sample["img_paths"]:
@@ -492,6 +468,8 @@ class TempFlowDataset_ObjMap(Dataset):
             "seq_id": sample["seq_id"],
             "flow_frame": torch.tensor(sample["flow_frame"], dtype=torch.long),
             "frame_indices": torch.tensor(sample["frame_indices"], dtype=torch.long),
+            "image_ids": sample["image_ids"],
+            "sample_idx": torch.tensor(idx, dtype=torch.long),
         }
 
         if imgs.shape[0] >= 2:
@@ -506,8 +484,15 @@ class TempFlowDataset_ObjMap(Dataset):
                 output["img_tgt"] = imgs[tgt_pos]
                 output["src_idx_in_seq"] = torch.tensor(src_pos, dtype=torch.long)
                 output["tgt_idx_in_seq"] = torch.tensor(tgt_pos, dtype=torch.long)
+                output["src_img_id"] = f"{sample['seq_id']}_{gt_src:02d}"
+                output["tgt_img_id"] = f"{sample['seq_id']}_{gt_src + 1:02d}"
 
         return output
+
+
+# ============================================================
+# Model construction / checkpoints
+# ============================================================
 
 def build_modules(cfg, device):
     pair_encoder = SequencePairEncoder(
@@ -580,25 +565,14 @@ def build_modules(cfg, device):
         "decoder": decoder,
     }
 
+
 class FlowObjectDetector(nn.Module):
-    """
-    Faster R-CNN detector for flow-like inputs.
-
-    Default:
-        MobileNetV3-FPN Faster R-CNN, expecting 3-channel input:
-        [u, v, magnitude]
-
-    backbone_name:
-        "mobilenet" -> fasterrcnn_mobilenet_v3_large_fpn
-        "resnet50"  -> fasterrcnn_resnet50_fpn
-    """
-
     def __init__(
         self,
         num_classes,
         in_ch=3,
         backbone_name="mobilenet",
-        pretrained_backbone=True,
+        pretrained_backbone=False,
     ):
         super().__init__()
 
@@ -611,45 +585,28 @@ class FlowObjectDetector(nn.Module):
                 weights=None,
                 weights_backbone="DEFAULT" if pretrained_backbone else None,
             )
-
         elif backbone_name == "resnet50":
             self.detector = torchvision.models.detection.fasterrcnn_resnet50_fpn(
                 weights=None,
                 weights_backbone="DEFAULT" if pretrained_backbone else None,
             )
-
         else:
-            raise ValueError(
-                f"Unknown backbone_name={backbone_name}. "
-                "Use 'mobilenet' or 'resnet50'."
-            )
+            raise ValueError(f"Unknown backbone_name={backbone_name}. Use 'mobilenet' or 'resnet50'.")
 
-        # If in_ch != 3, modify first conv.
-        # If in_ch == 3, we keep the pretrained backbone untouched.
         if in_ch != 3:
             self._replace_first_conv(in_ch)
 
-        # Replace classification head
         in_features = self.detector.roi_heads.box_predictor.cls_score.in_features
-        self.detector.roi_heads.box_predictor = FastRCNNPredictor(
-            in_features,
-            num_classes,
-        )
+        self.detector.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
 
     def _replace_first_conv(self, in_ch):
-        """
-        Replace the first Conv2d layer in either MobileNetV3-FPN or ResNet50-FPN.
-        """
-
         first_conv_parent = None
         first_conv_name = None
         old_conv = None
 
-        # Search for first Conv2d
         for name, module in self.detector.backbone.named_modules():
             if isinstance(module, nn.Conv2d):
                 old_conv = module
-
                 parts = name.split(".")
                 parent = self.detector.backbone
 
@@ -678,13 +635,10 @@ class FlowObjectDetector(nn.Module):
         with torch.no_grad():
             if in_ch == 3:
                 new_conv.weight.copy_(old_conv.weight)
-
             elif in_ch < 3:
                 new_conv.weight.copy_(old_conv.weight[:, :in_ch])
-
             else:
                 new_conv.weight[:, :old_conv.in_channels].copy_(old_conv.weight)
-
                 mean_weight = old_conv.weight.mean(dim=1, keepdim=True)
                 for c in range(old_conv.in_channels, in_ch):
                     new_conv.weight[:, c:c + 1].copy_(mean_weight)
@@ -695,31 +649,56 @@ class FlowObjectDetector(nn.Module):
         setattr(first_conv_parent, first_conv_name, new_conv)
 
     def forward(self, images, targets=None):
-        """
-        images:
-            list[Tensor[C,H,W]]
-
-        targets:
-            list[dict] during training
-            None during inference
-        """
         return self.detector(images, targets)
 
 
+def load_checkpoint(ckpt_path, modules, device, optimizer=None, strict=True):
+    ckpt = torch.load(ckpt_path, map_location=device)
+
+    for name, module in modules.items():
+        key = f"{name}_state_dict"
+        if key in ckpt:
+            module.load_state_dict(ckpt[key], strict=strict)
+        else:
+            print(f"[Warning] Missing key: {key}")
+
+        module.to(device)
+        module.eval()
+
+    if optimizer is not None and "optimizer_state_dict" in ckpt:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+    epoch = ckpt.get("epoch", None)
+    stats = ckpt.get("stats", None)
+    config = ckpt.get("config", None)
+
+    print(f"[Flow CKPT] loaded from: {ckpt_path} (epoch={epoch})")
+    return {"epoch": epoch, "stats": stats, "config": config}
+
+
+def load_detector_ckpt(ckpt_path, device="cuda", num_classes=2, in_ch=3, backbone_name="mobilenet"):
+    detector = FlowObjectDetector(
+        num_classes=num_classes,
+        in_ch=in_ch,
+        backbone_name=backbone_name,
+        pretrained_backbone=False,
+    ).to(device)
+
+    ckpt = torch.load(ckpt_path, map_location=device)
+    detector.load_state_dict(ckpt["detector_state_dict"], strict=True)
+    detector.eval()
+
+    print(f"[Detector CKPT] loaded from: {ckpt_path}")
+    print(f"[Detector CKPT] epoch={ckpt.get('epoch', 'unknown')}")
+    return detector, ckpt
+
+
+# ============================================================
+# Inference
+# ============================================================
+
 def build_flow_detector_input(pred_flows, valid=None, flow_index=0, use_mag=True, use_valid=False):
-    """
-    pred_flows:
-        [B, Tm, 2, H, W]
-
-    valid:
-        [B, H, W] or [B, 1, H, W]
-
-    Returns:
-        x: [B, C, H, W]
-    """
-
-    flow = pred_flows[:, flow_index]  # [B, 2, H, W]
-
+    flow = pred_flows[:, flow_index]
     inputs = [flow]
 
     if use_mag:
@@ -735,164 +714,51 @@ def build_flow_detector_input(pred_flows, valid=None, flow_index=0, use_mag=True
 
         inputs.append(valid.float())
 
-    x = torch.cat(inputs, dim=1)
-    return x
+    return torch.cat(inputs, dim=1)
 
-
-def prepare_detection_targets(labels, device):
-    """
-    labels:
-        batch["label"], a list of dictionaries.
-
-    Each dict should contain:
-        boxes:  [N,4]
-        labels: [N]
-
-    Returns:
-        targets: list[dict]
-    """
-
-    targets = []
-
-    for lab in labels:
-        boxes = lab["boxes"].to(device).float()
-        cls = lab["labels"].to(device).long()
-
-        target = {
-            "boxes": boxes,
-            "labels": cls,
-        }
-
-        targets.append(target)
-
-    return targets
-
-def filter_boxes_by_flow_activity(
-    boxes,
-    labels,
-    flow,          # [2,H,W]
-    valid=None,    # [H,W] or None
-    min_inside_mag=0.5,
-    min_contrast=0.25,
-    min_valid_frac=0.3,
-):
-    """
-    Keep boxes only if the flow inside the box is sufficiently active
-    or sufficiently different from nearby background.
-    """
-
-    if boxes.numel() == 0:
-        return boxes, labels
-
-    device = flow.device
-    boxes = boxes.to(device)
-    labels = labels.to(device)
-
-    mag = torch.norm(flow, dim=0)  # [H,W]
-    H, W = mag.shape
-
-    keep = []
-
-    for i, box in enumerate(boxes):
-        x1, y1, x2, y2 = box.round().long()
-
-        x1 = x1.clamp(0, W - 1)
-        x2 = x2.clamp(0, W)
-        y1 = y1.clamp(0, H - 1)
-        y2 = y2.clamp(0, H)
-
-        if x2 <= x1 or y2 <= y1:
-            keep.append(False)
-            continue
-
-        inside = mag[y1:y2, x1:x2]
-
-        if valid is not None:
-            v = valid[y1:y2, x1:x2].float()
-            valid_frac = v.mean().item()
-
-            if valid_frac < min_valid_frac:
-                keep.append(False)
-                continue
-
-            inside_mag = (inside * v).sum() / (v.sum() + 1e-6)
-        else:
-            inside_mag = inside.mean()
-
-        # expanded surrounding region
-        pad_x = max(4, int(0.25 * (x2 - x1)))
-        pad_y = max(4, int(0.25 * (y2 - y1)))
-
-        bx1 = max(0, x1 - pad_x)
-        bx2 = min(W, x2 + pad_x)
-        by1 = max(0, y1 - pad_y)
-        by2 = min(H, y2 + pad_y)
-
-        patch = mag[by1:by2, bx1:bx2].clone()
-
-        # remove inside box from background patch
-        local_x1 = x1 - bx1
-        local_x2 = x2 - bx1
-        local_y1 = y1 - by1
-        local_y2 = y2 - by1
-
-        bg_mask = torch.ones_like(patch, dtype=torch.bool)
-        bg_mask[local_y1:local_y2, local_x1:local_x2] = False
-
-        if bg_mask.sum() > 0:
-            bg_mag = patch[bg_mask].mean()
-            contrast = torch.abs(inside_mag - bg_mag)
-        else:
-            contrast = torch.tensor(0.0, device=device)
-
-        inside_score = torch.quantile(inside.flatten(), 0.9)
-        is_active = (inside_score >= min_inside_mag) or (contrast >= min_contrast)
-        keep.append(bool(is_active.item()))
-
-    keep = torch.tensor(keep, dtype=torch.bool, device=device)
-
-    return boxes[keep].cpu(), labels[keep].cpu()
 
 def forward_pipeline(modules, imgs, valid, uno_use_valid_mask=True, device="cuda"):
-        pair_encoder = modules['pair_encoder'].to(device)
-        pair_out = pair_encoder(imgs)
-        # pair_out = modules["pair_encoder"](imgs).to(device)
-        pair_feats = pair_out["pair_feats"].to(device)
-        flow_inits = pair_out["flow_inits"].to(device)
-        corrs = pair_out["corrs"].to(device)
+    pair_encoder = modules["pair_encoder"].to(device)
+    pair_out = pair_encoder(imgs)
 
-        if flow_inits is None:
-            raise RuntimeError("v19 UNO integration requires predict_flow_init=True in the pair encoder.")
+    pair_feats = pair_out["pair_feats"].to(device)
+    flow_inits = pair_out["flow_inits"].to(device)
+    corrs = pair_out["corrs"].to(device)
 
-        visual_feats = modules["visual_branch"](imgs)
-        motion_feats = modules["motion_branch"](pair_feats)
-        fused_seq = modules["fusion"](visual_feats, motion_feats)
+    if flow_inits is None:
+        raise RuntimeError("UNO integration requires predict_flow_init=True in the pair encoder.")
 
-        valid_ds = None
-        if uno_use_valid_mask:
-            valid_ds = downsample_valid_mask(valid, fused_seq.shape[-2:])
+    visual_feats = modules["visual_branch"](imgs)
+    motion_feats = modules["motion_branch"](pair_feats)
+    fused_seq = modules["fusion"](visual_feats, motion_feats)
 
-        uno_in = build_uno_input_2d(fused_seq, flow_inits, valid_mask=valid_ds)
-        uno_feat = modules["uno"](uno_in)
+    valid_ds = None
+    if uno_use_valid_mask:
+        valid_ds = downsample_valid_mask(valid, fused_seq.shape[-2:])
 
-        b, tm, _, h, w = fused_seq.shape
-        latent_delta = modules["latent_head"](uno_feat, b, tm, h, w)
-        refined_seq = fused_seq + latent_delta
+    uno_in = build_uno_input_2d(fused_seq, flow_inits, valid_mask=valid_ds)
+    uno_feat = modules["uno"](uno_in)
 
-        flows, flow_residuals = modules["decoder"](refined_seq, flow_inits=flow_inits)
+    b, tm, _, h, w = fused_seq.shape
+    latent_delta = modules["latent_head"](uno_feat, b, tm, h, w)
+    refined_seq = fused_seq + latent_delta
 
-        return {
-            "flows": flows,
-            "flow_inits": flow_inits,
-            "pair_feats": pair_feats,
-            "corrs": corrs,
-            "fused_seq": fused_seq,
-            "latent_delta": latent_delta,
-            "refined_seq": refined_seq,
-            "flow_residuals": flow_residuals,
-        }
+    flows, flow_residuals = modules["decoder"](refined_seq, flow_inits=flow_inits)
 
-def flow_detection_forward_pipeline(
+    return {
+        "flows": flows,
+        "flow_inits": flow_inits,
+        "pair_feats": pair_feats,
+        "corrs": corrs,
+        "fused_seq": fused_seq,
+        "latent_delta": latent_delta,
+        "refined_seq": refined_seq,
+        "flow_residuals": flow_residuals,
+    }
+
+
+@torch.no_grad()
+def inference_one_batch(
     batch,
     flow_modules,
     detector,
@@ -900,17 +766,11 @@ def flow_detection_forward_pipeline(
     flow_index=0,
     use_mag=True,
     use_valid=False,
-    train_detector=True,
+    score_thresh=0.3,
 ):
-    """
-    Full forward pipeline:
-
-    RGB sequence
-        -> optical flow pipeline
-        -> pred_flows
-        -> flow detector input
-        -> object detector
-    """
+    detector.eval()
+    for m in flow_modules.values():
+        m.eval()
 
     imgs = batch["imgs"].to(device)
 
@@ -918,14 +778,15 @@ def flow_detection_forward_pipeline(
     if valid is not None:
         valid = valid.to(device)
 
-    # 1. Optical flow forward pass
-    out_flow = forward_pipeline(
-        flow_modules, imgs, valid
+    flow_out = forward_pipeline(
+        modules=flow_modules,
+        imgs=imgs,
+        valid=valid,
+        device=device,
     )
 
-    pred_flows = out_flow["flows"]  # [B, Tm, 2, H, W]
+    pred_flows = flow_out["flows"]
 
-    # 2. Build detector input
     flow_x = build_flow_detector_input(
         pred_flows=pred_flows,
         valid=valid,
@@ -934,340 +795,237 @@ def flow_detection_forward_pipeline(
         use_valid=use_valid,
     )
 
-    # Faster R-CNN expects list[Tensor[C,H,W]]
     det_images = [x for x in flow_x]
+    det_out = detector(det_images)
 
-    # 3. Build detection targets
-    targets = None
-    if train_detector:
-        targets = prepare_detection_targets(batch["label"], device)
-
-    # 4. Detector forward
-    det_out = detector(det_images, targets)
+    detections = []
+    for det in det_out:
+        keep = det["scores"] >= score_thresh
+        detections.append({
+            "boxes": det["boxes"][keep].detach().cpu(),
+            "labels": det["labels"][keep].detach().cpu(),
+            "scores": det["scores"][keep].detach().cpu(),
+        })
 
     return {
-        "flow_out": out_flow,
-        "pred_flows": pred_flows,
-        "detector_input": flow_x,
-        "det_out": det_out,
+        "pred_flows": pred_flows.detach().cpu(),
+        "detector_input": flow_x.detach().cpu(),
+        "detections": detections,
     }
 
-class FlowDetectionTrainer:
-    def __init__(
-        self,
-        flow_modules,
-        detector,
-        train_loader,
-        val_loader,
-        optimizer,
-        device,
-        flow_index=0,
-        use_mag=True,
-        use_valid=False,
-        freeze_flow=True,
-    ):
-        self.flow_modules = flow_modules
-        self.detector = detector
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.optimizer = optimizer
-        self.device = device
 
-        self.flow_index = flow_index
-        self.use_mag = use_mag
-        self.use_valid = use_valid
-        self.freeze_flow = freeze_flow
+# ============================================================
+# Visualization / saving
+# ============================================================
 
-        self.detector.to(device)
+ID_TO_CLASS_NAME = {1: "Object"}
 
-        for module in self.flow_modules.values():
-            module.to(device)
 
-        if freeze_flow:
-            for module in self.flow_modules.values():
-                module.eval()
-                for p in module.parameters():
-                    p.requires_grad = False
+def flow_to_rgb(flow):
+    if isinstance(flow, torch.Tensor):
+        flow = flow.detach().cpu().numpy()
 
-    def train_one_epoch(self, epoch):
-        self.detector.train()
+    u = flow[0]
+    v = flow[1]
+    mag, ang = cv2.cartToPolar(u, v, angleInDegrees=True)
 
-        if self.freeze_flow:
-            for module in self.flow_modules.values():
-                module.eval()
-        else:
-            for module in self.flow_modules.values():
-                module.train()
+    hsv = np.zeros((flow.shape[1], flow.shape[2], 3), dtype=np.uint8)
+    hsv[..., 0] = ang / 2
+    hsv[..., 1] = 255
+    hsv[..., 2] = np.clip(mag / (np.percentile(mag, 99) + 1e-6) * 255, 0, 255)
 
-        total_loss = 0.0
-        pbar = tqdm(self.train_loader, desc=f"Train epoch {epoch}")
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
-        for batch in pbar:
-            self.optimizer.zero_grad()
 
-            imgs = batch["imgs"].to(self.device)
+def draw_boxes(ax, boxes, labels=None, scores=None, color="red", linewidth=2, prefix=""):
+    if isinstance(boxes, torch.Tensor):
+        boxes = boxes.detach().cpu()
+    if labels is not None and isinstance(labels, torch.Tensor):
+        labels = labels.detach().cpu()
+    if scores is not None and isinstance(scores, torch.Tensor):
+        scores = scores.detach().cpu()
 
-            valid = batch.get("valid", None)
-            if valid is not None:
-                valid = valid.to(self.device)
+    for i, box in enumerate(boxes):
+        x1, y1, x2, y2 = box.tolist()
+        w = x2 - x1
+        h = y2 - y1
 
-            # --------------------------------------------------
-            # 1. Flow forward pass
-            #    If freeze_flow=True, only this part has no_grad.
-            # --------------------------------------------------
-            if self.freeze_flow:
-                with torch.no_grad():
-                    flow_out = forward_pipeline(
-                        imgs=imgs,
-                        valid=valid,
-                        modules=self.flow_modules
-                    )
-            else:
-                flow_out = forward_pipeline(
-                    imgs=imgs,
-                    valid=valid,
-                    modules=self.flow_modules
+        rect = patches.Rectangle(
+            (x1, y1),
+            w,
+            h,
+            linewidth=linewidth,
+            edgecolor=color,
+            facecolor="none",
+        )
+        ax.add_patch(rect)
+
+        text = prefix
+        if labels is not None:
+            cls_id = int(labels[i])
+            cls_name = ID_TO_CLASS_NAME.get(cls_id, str(cls_id))
+            text += cls_name
+
+        if scores is not None:
+            text += f" {float(scores[i]):.2f}"
+
+        if text.strip():
+            ax.text(
+                x1,
+                max(y1 - 3, 0),
+                text,
+                color=color,
+                fontsize=8,
+                bbox=dict(facecolor="black", alpha=0.5, edgecolor="none"),
+            )
+
+
+def get_batch_string(batch, key, sample_idx, default="unknown"):
+    if key not in batch:
+        return default
+
+    value = batch[key]
+
+    if isinstance(value, list):
+        return str(value[sample_idx])
+
+    if isinstance(value, torch.Tensor):
+        v = value[sample_idx]
+        if v.ndim == 0:
+            return str(int(v.item()))
+        return "_".join(str(int(x)) for x in v.detach().cpu().flatten().tolist())
+
+    return str(value)
+
+
+def make_save_name(batch, sample_idx, flow_index):
+    seq_id = get_batch_string(batch, "seq_id", sample_idx, "seq")
+    flow_frame = get_batch_string(batch, "flow_frame", sample_idx, "frame")
+    sample_idx_str = get_batch_string(batch, "sample_idx", sample_idx, str(sample_idx))
+
+    # Prefer source->target image ids returned by the dataloader.
+    if "src_img_id" in batch and "tgt_img_id" in batch:
+        src_id = get_batch_string(batch, "src_img_id", sample_idx, "")
+        tgt_id = get_batch_string(batch, "tgt_img_id", sample_idx, "")
+        if src_id and tgt_id:
+            return f"{sample_idx_str}_{src_id}_to_{tgt_id}_flow{flow_index}.png"
+
+    # Fallback: derive from seq_id + frame_indices.
+    if "frame_indices" in batch:
+        frame_indices = batch["frame_indices"][sample_idx].detach().cpu().tolist()
+        if 0 <= flow_index < len(frame_indices) - 1:
+            src_id = f"{seq_id}_{int(frame_indices[flow_index]):02d}"
+            tgt_id = f"{seq_id}_{int(frame_indices[flow_index + 1]):02d}"
+            return f"{sample_idx_str}_{src_id}_to_{tgt_id}_flow{flow_index}.png"
+
+    return f"{sample_idx_str}_{seq_id}_{flow_frame}_flow{flow_index}.png"
+
+
+def save_prediction_png(
+    result,
+    batch,
+    sample_idx,
+    flow_index,
+    out_path,
+    save_gt=False,
+    score_thresh=0.3,
+):
+    pred_flow = result["pred_flows"][sample_idx, flow_index]
+    flow_rgb = flow_to_rgb(pred_flow)
+
+    pred = result["detections"][sample_idx]
+    gt = batch["label"][sample_idx]
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if save_gt:
+        fig, axes = plt.subplots(2, 1, figsize=(14, 8))
+
+        # =======================
+        # TOP: GT
+        # =======================
+        ax_gt = axes[0]
+        ax_gt.imshow(flow_rgb)
+        ax_gt.axis("off")
+
+        draw_boxes(
+            ax_gt,
+            boxes=gt["boxes"],
+            labels=gt["labels"],
+            scores=None,
+            color="lime",
+            linewidth=2,
+            prefix="GT ",
+        )
+        ax_gt.set_title("Ground Truth (Green)")
+
+        # =======================
+        # BOTTOM: Predictions
+        # =======================
+        ax_pred = axes[1]
+        ax_pred.imshow(flow_rgb)
+        ax_pred.axis("off")
+
+        if pred["boxes"].numel() > 0:
+            scores = pred["scores"]
+
+            keep = scores >= score_thresh
+            if keep.any():
+                draw_boxes(
+                    ax_pred,
+                    boxes=pred["boxes"][keep],
+                    labels=pred["labels"][keep],
+                    scores=scores[keep],
+                    color="red",
+                    linewidth=2,
+                    prefix="Pred ",
                 )
 
-            pred_flows = flow_out["flows"]  # [B, Tm, 2, H, W]
+        ax_pred.set_title(f"Predictions (Red) | score_thresh={score_thresh}")
 
-            # --------------------------------------------------
-            # 2. Build detector input
-            #    This must be outside no_grad.
-            # --------------------------------------------------
-            flow_x = build_flow_detector_input(
-                pred_flows=pred_flows,
-                valid=valid,
-                flow_index=self.flow_index,
-                use_mag=self.use_mag,
-                use_valid=self.use_valid,
-            )
+    else:
+        fig, ax = plt.subplots(1, 1, figsize=(14, 4))
+        ax.imshow(flow_rgb)
+        ax.axis("off")
 
-            det_images = [x for x in flow_x]
+        if pred["boxes"].numel() > 0:
+            scores = pred["scores"]
+            keep = scores >= score_thresh
 
-            targets = prepare_detection_targets(
-                batch["label"],
-                self.device,
-            )
+            if keep.any():
+                draw_boxes(
+                    ax,
+                    boxes=pred["boxes"][keep],
+                    labels=pred["labels"][keep],
+                    scores=scores[keep],
+                    color="red",
+                    linewidth=2,
+                    prefix="Pred ",
+                )
 
-            # Optional: skip batch if all images have zero boxes
-            has_box = any(t["boxes"].numel() > 0 for t in targets)
-            if not has_box:
-                continue
+        ax.set_title(out_path.stem)
 
-            # --------------------------------------------------
-            # 3. Detector forward pass
-            #    This part needs gradients.
-            # --------------------------------------------------
-            loss_dict = self.detector(det_images, targets)
-
-            loss = sum(v for v in loss_dict.values())
-
-            loss.backward()
-            self.optimizer.step()
-
-            loss_value = loss.item()
-            total_loss += loss_value
-
-            pbar.set_postfix({
-                "loss": loss_value,
-                "cls": loss_dict.get(
-                    "loss_classifier",
-                    torch.tensor(0.0, device=self.device)
-                ).item(),
-                "box": loss_dict.get(
-                    "loss_box_reg",
-                    torch.tensor(0.0, device=self.device)
-                ).item(),
-                "obj": loss_dict.get(
-                    "loss_objectness",
-                    torch.tensor(0.0, device=self.device)
-                ).item(),
-                "rpn": loss_dict.get(
-                    "loss_rpn_box_reg",
-                    torch.tensor(0.0, device=self.device)
-                ).item(),
-            })
-
-        return total_loss / max(1, len(self.train_loader))
-
-    @torch.no_grad()
-    def inference_batch(self, batch, score_thresh=0.3):
-        self.detector.eval()
-
-        for module in self.flow_modules.values():
-            module.eval()
-
-        result = flow_detection_forward_pipeline(
-            batch=batch,
-            flow_modules=self.flow_modules,
-            detector=self.detector,
-            device=self.device,
-            flow_index=self.flow_index,
-            use_mag=self.use_mag,
-            use_valid=self.use_valid,
-            train_detector=False,
-        )
-
-        detections = result["det_out"]
-
-        filtered = []
-
-        for det in detections:
-            keep = det["scores"] >= score_thresh
-
-            filtered.append({
-                "boxes": det["boxes"][keep].detach().cpu(),
-                "labels": det["labels"][keep].detach().cpu(),
-                "scores": det["scores"][keep].detach().cpu(),
-            })
-
-        result["detections"] = filtered
-        return result
-
-    @torch.no_grad()
-    def validate_visual_only(self, max_batches=5, score_thresh=0.3):
-        self.detector.eval()
-
-        all_results = []
-
-        for i, batch in enumerate(self.val_loader):
-            if i >= max_batches:
-                break
-
-            result = self.inference_batch(batch, score_thresh=score_thresh)
-            all_results.append(result["detections"])
-
-        return all_results
-
-    def fit(self, epochs):
-        history = []
-
-        for epoch in range(1, epochs + 1):
-            train_loss = self.train_one_epoch(epoch)
-
-            print(f"[Epoch {epoch}] train_loss = {train_loss:.4f}")
-
-            history.append({
-                "epoch": epoch,
-                "train_loss": train_loss,
-            })
-
-        return history
+    plt.tight_layout()
+    fig.savefig(str(out_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
-    @torch.no_grad()
-    def inference_batch(self, batch, score_thresh=0.3):
-        self.detector.eval()
-
-        for module in self.flow_modules.values():
-            module.eval()
-
-        result = flow_detection_forward_pipeline(
-            batch=batch,
-            flow_modules=self.flow_modules,
-            detector=self.detector,
-            device=self.device,
-            flow_index=self.flow_index,
-            use_mag=self.use_mag,
-            use_valid=self.use_valid,
-            train_detector=False,
-        )
-
-        detections = result["det_out"]
-
-        filtered = []
-
-        for det in detections:
-            keep = det["scores"] >= score_thresh
-
-            filtered.append({
-                "boxes": det["boxes"][keep].detach().cpu(),
-                "labels": det["labels"][keep].detach().cpu(),
-                "scores": det["scores"][keep].detach().cpu(),
-            })
-
-        result["detections"] = filtered
-        return result
-
-    @torch.no_grad()
-    def validate_visual_only(self, max_batches=5, score_thresh=0.3):
-        self.detector.eval()
-
-        all_results = []
-
-        for i, batch in enumerate(self.val_loader):
-            if i >= max_batches:
-                break
-
-            result = self.inference_batch(batch, score_thresh=score_thresh)
-            all_results.append(result["detections"])
-
-        return all_results
-
-    def fit(self, epochs):
-        history = []
-
-        for epoch in range(1, epochs + 1):
-            train_loss = self.train_one_epoch(epoch)
-
-            print(f"[Epoch {epoch}] train_loss = {train_loss:.4f}")
-
-            history.append({
-                "epoch": epoch,
-                "train_loss": train_loss,
-            })
-
-        return history
-
-def load_checkpoint(ckpt_path, modules, device, optimizer=None, strict=True):
-    ckpt = torch.load(ckpt_path, map_location=device)
-
-    # ---- load module weights ----
-    for name, module in modules.items():
-        key = f"{name}_state_dict"
-        if key in ckpt:
-            module.load_state_dict(ckpt[key], strict=strict)
-        else:
-            print(f"[Warning] Missing key: {key}")
-
-        module.to(device)
-
-    # ---- load optimizer (optional) ----
-    if optimizer is not None and "optimizer_state_dict" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-
-    # ---- metadata ----
-    epoch = ckpt.get("epoch", None)
-    stats = ckpt.get("stats", None)
-    config = ckpt.get("config", None)
-
-    print(f"Loaded checkpoint complete from: {ckpt_path} (epoch={epoch})")
-
-    return {
-        "epoch": epoch,
-        "stats": stats,
-        "config": config,
-    }
+# ============================================================
+# Main
+# ============================================================
 
 def main():
     args = parse_args()
-    cfg = apply_overrides(load_config(args.config), args)
+    cfg = load_config(args.config)
 
-    set_seed(cfg["train"]["seed"])
+    if "train" in cfg and "seed" in cfg["train"]:
+        set_seed(cfg["train"]["seed"])
 
-    save_dir = (THIS_DIR / cfg["experiment"]["save_dir"]).resolve()
-    tb_dir = (THIS_DIR / cfg["experiment"]["tensorboard_dir"] / cfg["experiment"]["experiment_name"]).resolve()
-    save_dir.mkdir(parents=True, exist_ok=True)
-    tb_dir.mkdir(parents=True, exist_ok=True)
-
-    config_dump_path = save_dir / cfg["experiment"]["config_dump_name"]
-    with open(config_dump_path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
-
-    writer = SummaryWriter(log_dir=str(tb_dir))
-    set_seed(cfg["train"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = TempFlowDataset_ObjMap(
         root=cfg["data"]["data_root"],
@@ -1276,80 +1034,87 @@ def main():
         flow_type=cfg["data"]["flow_type"],
         disp_type=cfg["data"]["disp_type"],
         seq_len=cfg["data"]["seq_len"],
-        # center_frame_idx=cfg["data"]["center_frame_idx"],
         crop_size=tuple(cfg["data"]["crop_size"]),
         normalize=cfg["data"]["normalize"],
         stats_in=cfg["data"]["stats_file"],
         return_pair_only=cfg["data"]["return_pair_only"],
     )
 
-    train_loader = DataLoader(
+    num_workers = args.num_workers
+    if num_workers is None:
+        num_workers = cfg.get("train", {}).get("num_workers", 0)
+
+    loader = DataLoader(
         dataset,
-        batch_size=cfg["train"]["batch_size"],
-        shuffle=cfg["train"]["shuffle"],
-        num_workers=cfg["train"]["num_workers"],
-        pin_memory=cfg["train"]["pin_memory"],
-        collate_fn=detection_collate_fn
-    )
-    print('Dataset loaded')
-
-    modules = build_modules(cfg, device)
-    print('Modules loaded')
-    optimizer = torch.optim.AdamW(
-        [p for module in modules.values() for p in module.parameters()],
-        lr=1e-4,
-        weight_decay=1e-4
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=cfg.get("train", {}).get("pin_memory", True),
+        collate_fn=detection_collate_fn,
     )
 
-    meta = load_checkpoint(
-        ckpt_path="My/fullpipeline_v22_best.pth",
-        modules=modules,
+    print(f"[Data] samples={len(dataset)} batch_size={args.batch_size}")
+
+    flow_modules = build_modules(cfg, device)
+    load_checkpoint(
+        ckpt_path=args.flow_ckpt,
+        modules=flow_modules,
         device=device,
-        optimizer=optimizer,  # optional
+        optimizer=None,
+        strict=True,
     )
-    for m in modules.values():
-        m.to(device)
-        print(m)
 
-    ID_TO_CLASS_NAME = {
-        1: "object",
-    }
-
-    detector = FlowObjectDetector(
+    detector_in_ch = 2 + int(args.use_mag) + int(args.use_valid)
+    detector, _ = load_detector_ckpt(
+        ckpt_path=args.detector_ckpt,
+        device=device,
         num_classes=2,
-        in_ch=3,  # u, v, magnitude
-        pretrained_backbone=True,
+        in_ch=detector_in_ch,
+        backbone_name="mobilenet",
     )
 
-    optimizer = torch.optim.AdamW(
-        detector.parameters(),
-        lr=1e-4,
-        weight_decay=1e-4,
-    )
+    saved = 0
 
-    trainer = FlowDetectionTrainer(
-        flow_modules=modules,
-        detector=detector,
-        train_loader=train_loader,
-        val_loader=None,
-        optimizer=optimizer,
-        device=device,
-        flow_index=1,
-        use_mag=True,
-        use_valid=False,
-        freeze_flow=True,
-    )
+    for batch_i, batch in enumerate(tqdm(loader, desc="Inference")):
+        if args.max_batches is not None and batch_i >= args.max_batches:
+            break
 
-    print('Training start')
-    epoch = 10
-    trainer.fit(epochs=epoch)
+        result = inference_one_batch(
+            batch=batch,
+            flow_modules=flow_modules,
+            detector=detector,
+            device=device,
+            flow_index=args.flow_index,
+            use_mag=args.use_mag,
+            use_valid=args.use_valid,
+            score_thresh=args.score_thresh,
+        )
 
-    save_detector_ckpt(
-        save_path=f"ckpts/detector_epoch_{epoch:03d}.pt",
-        epoch=epoch,
-        detector=detector,
-        optimizer=optimizer,
-    )
+        B = result["pred_flows"].shape[0]
+
+        for sample_i in range(B):
+            if args.max_samples is not None and saved >= args.max_samples:
+                break
+
+            save_name = make_save_name(batch, sample_i, args.flow_index)
+            save_path = out_dir / save_name
+
+            save_prediction_png(
+                result=result,
+                batch=batch,
+                sample_idx=sample_i,
+                flow_index=args.flow_index,
+                out_path=save_path,
+                save_gt=args.save_gt,
+                score_thresh=args.score_thresh,
+            )
+
+            saved += 1
+
+        if args.max_samples is not None and saved >= args.max_samples:
+            break
+
+    print(f"[Done] saved {saved} PNG files to: {out_dir.resolve()}")
 
 
 if __name__ == "__main__":
