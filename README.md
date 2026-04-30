@@ -16,9 +16,9 @@ model to capture both:
 - Local pixel-wise motion (pairwise flow)
 - Global spatiotemporal structure (motion evolution)
 
-The pipeline integrates a pairwise flow encoder, a joint visual–motion fusion module, a U-shaped Fourier Neural Operator (UNO), and a PWC-style decoder to model spatiotemporal motion dynamics.A central objective of this work is to investigate how the placement of the neural operator affects model performance.
+The pipeline integrates a pairwise flow encoder, a joint visual–motion fusion module, a U-shaped Fourier Neural Operator (UNO), and a PWC-style decoder to model spatiotemporal motion dynamics. A central objective of this work is to investigate how the placement of the neural operator affects model performance.
 
-**What it does**
+**What it does:**
 The framework takes a short sequence of consecutive frames as input and produces optical flow estimations for adjacent frame pairs. The model extracts motion and visual features, fuses them into a spatiotemporal representation, and refines this representation through a neural operator before decoding it into flow predictions.
 
 We implement and compare three architecture variants:
@@ -38,7 +38,7 @@ The UNO module is inserted before the fusion stage, immediately after the pairwi
 The UNO module is applied after the fusion encoder as a residual refinement module. Instead of replacing the fused representation, the operator outputs a latent update that is added to the original embedding before decoding. 
 ![Pipeline Overview](Images/Readme_Supplements/Late_Integration.png)
 
-**Quick Start**
+**Quick Start:**
 After SETUP.md
 To train the Standalone Architechure, run:
 ```
@@ -62,7 +62,7 @@ python visualization.py --config config.json --checkpoint checkpoints/fullpipeli
 ```
 To use other architectures, simply replace `later` with `early` or `standalone` in both `--checkpoint` and `--architecture_type`.
 
-**Example Results**
+**Example Results:**
 We evaluate the performance of three architecture variants under the same training and experimental settings on KITTI 2025 training set. The comparison focuses on standard optical flow metrics, including End-Point Error (EPE), per-image EPE (F1-EPE), and outlier ratio (F1-all%).
 
 | Model Variant        | EPE ↓    | F1-EPE ↓ | F1-all% ↓ |
