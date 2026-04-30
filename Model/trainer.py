@@ -1,23 +1,9 @@
-import argparse
-import json
 import random
-import sys
-from pathlib import Path
-from typing import Any, Dict
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 
-THIS_DIR = Path(__file__).resolve().parent
-MODULE_DIR = THIS_DIR.parent  # model_v3_w6ms3
-
-if str(MODULE_DIR) not in sys.path:
-    sys.path.insert(0, str(MODULE_DIR))
-
-from DataLoader import TempFlowDataset_disp
-from Encoder_sober import (
+from Encoders import (
     SequencePairEncoder,
     VisualBranchCNN,
     MotionBranchCNN,
@@ -26,45 +12,8 @@ from Encoder_sober import (
     downsample_valid_mask,
     UNOLatentResidualHead,
 )
-from Decoders_v20_fixed2 import FlowDecoder
+from Decoders import FlowDecoder
 from neuralop_seg.uno import UNO
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="v24: v22 + multi-frame edge-aware smoothness, without v23 temporal composition"
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=str(THIS_DIR / "v24_multiframe_smooth_config.json"),
-        help="Path to the experiment config JSON.",
-    )
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--batch_size", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=None)
-    return parser.parse_args()
-
-
-def load_config(path: str) -> Dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def apply_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
-    if args.epochs is not None:
-        cfg["train"]["num_epochs"] = args.epochs
-    if args.batch_size is not None:
-        cfg["train"]["batch_size"] = args.batch_size
-    if args.lr is not None:
-        cfg["train"]["lr"] = args.lr
-    return cfg
-
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
 
 
 def sobel_grad_map(x: torch.Tensor) -> torch.Tensor:
@@ -469,7 +418,6 @@ def temporal_loss(flows):
     return (flows[:, 1:] - flows[:, :-1]).abs().mean()
 
 
-
 def edge_aware_smoothness_loss(flow, image):
     flow_dx = flow[:, :, :, 1:] - flow[:, :, :, :-1]
     flow_dy = flow[:, :, 1:, :] - flow[:, :, :-1, :]
@@ -522,7 +470,7 @@ def save_checkpoint(save_path, epoch, modules, optimizer, stats=None, config=Non
     print(f"Saved checkpoint to: checkpoints/{save_path.name}")
 
 
-class V24Trainer:
+class Trainer:
     def __init__(self, cfg, modules, optimizer, writer, device):
         self.cfg = cfg
         self.modules = modules
@@ -536,28 +484,67 @@ class V24Trainer:
             module.train()
 
     def forward_pipeline(self, imgs, valid):
+        arch = self.cfg["model"].get("architecture_type", "later")
+
         pair_out = self.modules["pair_encoder"](imgs)
         pair_feats = pair_out["pair_feats"]
         flow_inits = pair_out["flow_inits"]
         corrs = pair_out["corrs"]
 
         if flow_inits is None:
-            raise RuntimeError("v19 UNO integration requires predict_flow_init=True in the pair encoder.")
+            raise RuntimeError(f"v26 {arch} requires predict_flow_init=True in the pair encoder.")
 
-        visual_feats = self.modules["visual_branch"](imgs)
-        motion_feats = self.modules["motion_branch"](pair_feats)
-        fused_seq = self.modules["fusion"](visual_feats, motion_feats)
+        if arch == "early":
+            valid_ds = None
+            if self.cfg["model"]["uno_use_valid_mask"]:
+                valid_ds = downsample_valid_mask(valid, pair_feats.shape[-2:])
 
-        valid_ds = None
-        if self.cfg["model"]["uno_use_valid_mask"]:
-            valid_ds = downsample_valid_mask(valid, fused_seq.shape[-2:])
+            uno_in = build_uno_input_2d(pair_feats, flow_inits, valid_mask=valid_ds)
+            uno_feat = self.modules["uno"](uno_in)
 
-        uno_in = build_uno_input_2d(fused_seq, flow_inits, valid_mask=valid_ds)
-        uno_feat = self.modules["uno"](uno_in)
+            b, tm, _, h, w = pair_feats.shape
+            latent_delta = self.modules["latent_head"](uno_feat, b, tm, h, w)
+            refined_pair_feats = pair_feats + latent_delta
 
-        b, tm, _, h, w = fused_seq.shape
-        latent_delta = self.modules["latent_head"](uno_feat, b, tm, h, w)
-        refined_seq = fused_seq + latent_delta
+            visual_feats = self.modules["visual_branch"](imgs)
+            motion_feats = self.modules["motion_branch"](refined_pair_feats)
+            fused_seq = self.modules["fusion"](visual_feats, motion_feats)
+            refined_seq = fused_seq
+
+        elif arch == "standalone":
+            visual_feats = self.modules["visual_branch"](imgs)
+            motion_feats = self.modules["motion_branch"](pair_feats)
+            fused_seq = self.modules["fusion"](visual_feats, motion_feats)
+
+            valid_ds = None
+            if self.cfg["model"]["uno_use_valid_mask"]:
+                valid_ds = downsample_valid_mask(valid, fused_seq.shape[-2:])
+
+            uno_in = build_uno_input_2d(fused_seq, flow_inits, valid_mask=valid_ds)
+            uno_feat = self.modules["uno"](uno_in)
+
+            b, tm, _, h, w = fused_seq.shape
+            latent_delta = self.modules["latent_head"](uno_feat, b, tm, h, w)
+            refined_seq = latent_delta
+
+        elif arch == "later":
+            visual_feats = self.modules["visual_branch"](imgs)
+            motion_feats = self.modules["motion_branch"](pair_feats)
+            fused_seq = self.modules["fusion"](visual_feats, motion_feats)
+
+            valid_ds = None
+            if self.cfg["model"]["uno_use_valid_mask"]:
+                valid_ds = downsample_valid_mask(valid, fused_seq.shape[-2:])
+
+            uno_in = build_uno_input_2d(fused_seq, flow_inits, valid_mask=valid_ds)
+            uno_feat = self.modules["uno"](uno_in)
+
+            b, tm, _, h, w = fused_seq.shape
+            latent_delta = self.modules["latent_head"](uno_feat, b, tm, h, w)
+            refined_seq = fused_seq + latent_delta
+
+        else:
+            raise ValueError(f"Unsupported architecture_type: {arch}. Use later, early, or standalone.")
 
         flows, flow_residuals = self.modules["decoder"](refined_seq, flow_inits=flow_inits)
 
@@ -721,6 +708,12 @@ class V24Trainer:
 
 
 
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
 def build_modules(cfg, device):
     pair_encoder = SequencePairEncoder(
         feat_ch=cfg["model"]["pair_feat_ch"],
@@ -748,8 +741,19 @@ def build_modules(cfg, device):
         out_ch=cfg["model"]["fusion_out_ch"],
     ).to(device)
 
+    arch = cfg["model"].get("architecture_type", "later")
     num_pairs = cfg["data"]["seq_len"] - 1
-    uno_in_channels = num_pairs * (cfg["model"]["fusion_out_ch"] + 6)
+
+    if arch == "early":
+        uno_input_ch = cfg["model"].get("uno_input_ch", cfg["model"]["pair_embed_ch"])
+        uno_latent_ch = cfg["model"].get("uno_latent_ch", cfg["model"]["pair_embed_ch"])
+    elif arch in {"later", "standalone"}:
+        uno_input_ch = cfg["model"]["fusion_out_ch"]
+        uno_latent_ch = cfg["model"]["fusion_out_ch"]
+    else:
+        raise ValueError(f"Unsupported architecture_type: {arch}. Use later, early, or standalone.")
+
+    uno_in_channels = num_pairs * (uno_input_ch + 6)
     if cfg["model"]["uno_use_valid_mask"]:
         uno_in_channels += 1
 
@@ -771,7 +775,7 @@ def build_modules(cfg, device):
 
     latent_head = UNOLatentResidualHead(
         uno_out_ch=cfg["model"]["uno_out_channels"][-1],
-        latent_ch=cfg["model"]["fusion_out_ch"],
+        latent_ch=uno_latent_ch,
         num_pairs=num_pairs,
     ).to(device)
 
@@ -791,145 +795,3 @@ def build_modules(cfg, device):
         "latent_head": latent_head,
         "decoder": decoder,
     }
-
-
-
-def main():
-    args = parse_args()
-    cfg = apply_overrides(load_config(args.config), args)
-
-    set_seed(cfg["train"]["seed"])
-
-    save_dir = (THIS_DIR / cfg["experiment"]["save_dir"]).resolve()
-    tb_dir = (THIS_DIR / cfg["experiment"]["tensorboard_dir"] / cfg["experiment"]["experiment_name"]).resolve()
-    save_dir.mkdir(parents=True, exist_ok=True)
-    tb_dir.mkdir(parents=True, exist_ok=True)
-
-    config_dump_path = save_dir / cfg["experiment"]["config_dump_name"]
-    with open(config_dump_path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
-
-    writer = SummaryWriter(log_dir=str(tb_dir))
-
-    dataset = TempFlowDataset_disp(
-        root=cfg["data"]["data_root"],
-        split=cfg["data"]["split"],
-        image_folder=cfg["data"]["image_folder"],
-        flow_type=cfg["data"]["flow_type"],
-        disp_type=cfg["data"]["disp_type"],
-        seq_len=cfg["data"]["seq_len"],
-        center_frame_idx=cfg["data"]["center_frame_idx"],
-        crop_size=tuple(cfg["data"]["crop_size"]),
-        normalize=cfg["data"]["normalize"],
-        stats_in=cfg["data"]["stats_file"],
-        return_pair_only=cfg["data"]["return_pair_only"],
-    )
-
-    train_loader = DataLoader(
-        dataset,
-        batch_size=cfg["train"]["batch_size"],
-        shuffle=cfg["train"]["shuffle"],
-        num_workers=cfg["train"]["num_workers"],
-        pin_memory=cfg["train"]["pin_memory"],
-    )
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("device:", device)
-
-    modules = build_modules(cfg, device)
-    optimizer = torch.optim.AdamW(
-        [p for module in modules.values() for p in module.parameters()],
-        lr=cfg["train"]["lr"],
-        weight_decay=cfg["train"]["weight_decay"],
-    )
-
-    trainer = V24Trainer(cfg, modules, optimizer, writer, device)
-
-    sanity_batch = next(iter(train_loader))
-    with torch.no_grad():
-        sanity_out = trainer.forward_pipeline(
-            sanity_batch["imgs"].to(device),
-            sanity_batch["valid"].to(device),
-        )
-    print("imgs:", sanity_batch["imgs"].shape)
-    print("pred flows:", sanity_out["flows"].shape)
-    print("flow_inits:", None if sanity_out["flow_inits"] is None else sanity_out["flow_inits"].shape)
-    print("pair_feats:", sanity_out["pair_feats"].shape)
-    print("fused_seq:", sanity_out["fused_seq"].shape)
-    print("refined_seq:", sanity_out["refined_seq"].shape)
-    print("flow_residuals:", sanity_out["flow_residuals"].shape)
-
-    best_loss = float("inf")
-    milestone_epochs = set(cfg["train"]["save_epoch_checkpoints"])
-
-    for epoch in range(cfg["train"]["num_epochs"]):
-        running = {
-            "loss": 0.0,
-            "loss_flow": 0.0,
-            "loss_self": 0.0,
-            "loss_temp": 0.0,
-            "loss_acc_photo": 0.0,
-            "loss_acc_smooth": 0.0,
-            "loss_self_bw": 0.0,
-            "loss_fb": 0.0,
-            "loss_smooth": 0.0,
-            "latent_delta_mean_abs": 0.0,
-            "flow_residual_mean_abs": 0.0,
-            "fb_error_mean": 0.0,
-            "fb_conf_mean": 0.0,
-            "fb_mask_ratio": 0.0,
-        }
-        n_batches = 0
-
-        for batch in train_loader:
-            stats = trainer.train_step(batch)
-            for key, value in stats.items():
-                if key not in running:
-                    running[key] = 0.0
-                running[key] += value
-            n_batches += 1
-
-        avg = {k: v / max(n_batches, 1) for k, v in running.items()}
-
-        for key, value in avg.items():
-            writer.add_scalar(f"train_epoch/{key}", value, epoch + 1)
-
-        print(
-            f"Epoch {epoch + 1}/{cfg['train']['num_epochs']} | "
-            f"loss={avg['loss']:.4f} | "
-            f"flow={avg['loss_flow']:.4f} | "
-            f"self={avg['loss_self']:.4f} | "
-            f"temp={avg['loss_temp']:.4f} | "
-            f"acc_photo={avg['loss_acc_photo']:.4f} | "
-            f"acc_smooth={avg['loss_acc_smooth']:.4f} | "
-            f"fb_loss={avg['loss_fb']:.4f} | "
-            f"smooth={avg['loss_smooth']:.4f} | "
-            f"latent={avg['latent_delta_mean_abs']:.4f} | "
-            f"flow_res={avg['flow_residual_mean_abs']:.4f} | "
-            f"fb_err={avg['fb_error_mean']:.4f} | "
-            f"fb_conf={avg['fb_conf_mean']:.4f} | "
-            f"fb_mask={avg['fb_mask_ratio']:.4f}"
-        )
-
-        latest_path = save_dir / cfg["experiment"]["checkpoint_name"]
-        save_checkpoint(latest_path, epoch + 1, modules, optimizer, stats=avg, config=cfg)
-
-        if (epoch + 1) == 200:
-            save_path_200 = save_dir / "fullpipeline_v24_epoch_200.pth"
-            save_checkpoint(save_path_200, epoch + 1, modules, optimizer, stats=avg, config=cfg)
-
-        if avg["loss"] < best_loss:
-            best_loss = avg["loss"]
-            best_path = save_dir / cfg["experiment"]["best_checkpoint_name"]
-            save_checkpoint(best_path, epoch + 1, modules, optimizer, stats=avg, config=cfg)
-
-        if (epoch + 1) in milestone_epochs:
-            milestone_path = save_dir / f"{cfg['experiment']['experiment_name']}_epoch_{epoch + 1}.pth"
-            save_checkpoint(milestone_path, epoch + 1, modules, optimizer, stats=avg, config=cfg)
-
-    writer.close()
-    print("Training finished.")
-
-
-if __name__ == "__main__":
-    main()
