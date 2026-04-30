@@ -36,7 +36,7 @@ The UNO module is inserted before the fusion stage, immediately after the pairwi
 (3) Late Integration (Refinement)
 
 The UNO module is applied after the fusion encoder as a residual refinement module. Instead of replacing the fused representation, the operator outputs a latent update that is added to the original embedding before decoding. 
-![Pipeline Overview](Images/Readme_Supplements/Late_integration.png)
+![Pipeline Overview](Images/Readme_Supplements/Late_Integration.png)
 
 **Quick Start**
 After SETUP.md
@@ -72,6 +72,6 @@ We evaluate the performance of three architecture variants under the same traini
 | Late Integration    | 2.7647   | 2.6673   | 23.30     |
 
 Below is a optical flow predictions for the Standalone variant. Row 1, figures 1 and 2 (left to right) are target images; row 1, figure 3, is the estimated flow; row 2, figure 1 the ground truth flow; row 2, figure 2 is the EPE map of our estimation.
-![Standalone](Images/Readme_Supplements/Standalone_UNO.png)
+![Standalone](Images/Readme_Supplements/Seperate.png)
 Here is also an example of our short-horizon multiple prediction using the Standalone UNO Architechure: 
 ![Standalone_multiple](Images/Readme_Supplements/Standalone_Multiple.png)
