@@ -1,6 +1,10 @@
 .idea
 Data
 */__pycache__/
+*/My
+runs
+*/runs
+*/ckpts
 
 # checkpoints
 checkpoints/
@@ -8,5 +12,15 @@ checkpoints_v2/
 *.pth
 
 # visualization outputs
+# all visualization outputs
+visualization_outputs*/
+runs/
+
+__pycache__/
+*.pyc
 visualization_outputs/
 visualization_outputs_v2/
+*/preds
+My
+
+Drafts
