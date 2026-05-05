@@ -3,8 +3,8 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/Data" />
-      <excludeFolder url="file://$MODULE_DIR$/Tests/MS3/checkpoints" />
-      <excludeFolder url="file://$MODULE_DIR$/model_v2_w6ms3/My" />
+      <excludeFolder url="file://$MODULE_DIR$/Drafts/Tests/MS3/checkpoints" />
+      <excludeFolder url="file://$MODULE_DIR$/Drafts/model_v2_w6ms3/My" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.12 (pythonProject)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

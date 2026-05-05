@@ -1,6 +1,6 @@
 {
   "data": {
-    "data_root": "../../../Data",
+    "data_root": "../Data",
     "stats_file": "stats.json",
     "crop_size": [
       352,
@@ -128,11 +128,18 @@
     "fb_mask_alpha2": 0.5
   },
   "experiment": {
-    "experiment_name": "v26_convex",
+    "experiment_name": "exp",
     "save_dir": "checkpoints",
     "tensorboard_dir": "runs",
-    "checkpoint_name": "fullpipeline_v26_latest.pth",
-    "best_checkpoint_name": "fullpipeline_v26_best.pth",
-    "config_dump_name": "config_v26_convex.json"
+    "checkpoint_name": "fullpipeline_exp.pth",
+    "best_checkpoint_name": "fullpipeline_exp_best.pth",
+    "config_dump_name": "config.json"
+  },
+    "Downstream": {
+    "use_collate_fn": true,
+    "flow_idx": 0,
+    "use_gtFlow_for_training": false,
+    "train_ep": 30,
+    "pipeline_ckpt": "PATH_TO_MODEL_CKPT.pth"
   }
 }

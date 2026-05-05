@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class ConvBlock(nn.Module):
     def __init__(self, in_ch, out_ch, k=3, s=1, p=1, d=1, norm=True):
         super().__init__()
