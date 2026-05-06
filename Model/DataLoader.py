@@ -99,6 +99,8 @@ def center_crop(arr, crop_size):
 
 class TempFlowDataset_disp(Dataset):
     """
+    MAIN Dataloader for the Short-Horizon Optical Flow Estimation framework
+
     root                : dataset root directory
     split               : 'training' / 'testing'
     image_folder        : image subfolder (e.g., image_2)
@@ -108,7 +110,7 @@ class TempFlowDataset_disp(Dataset):
     crop_size           : center crop size (default (352, 1216)
     normalize           : whether to apply z-score normalization
     stats_in            : path to precomputed stats (json)
-    return_pair_only    : if True, only return 2 frames (t, t+1)
+    return_pair_only    : if True, only return 2 frames (t, t+1) -- TURN THIS OFF for short-horizon
 
     additional_frames_dir : path to RGB frames
     flow_dir              : path to optical flow GT
@@ -439,7 +441,11 @@ def detection_collate_fn(batch):
 
 class TempFlowDataset_ObjMap(Dataset):
     """
-    KITTI Flow / Scene Flow dataset with aligned obj_map labels.
+    Dataloader for Downstream Object Detection
+
+    KITTI Flow / Scene Flow dataset with aligned provided obj_map labels.
+
+    This Dataloader fundamentally adds obj_map labels to the vanilla TempFlow_Dataloader
 
     Uses:
         Additional_frames/training/image_2/000000_08.png ...

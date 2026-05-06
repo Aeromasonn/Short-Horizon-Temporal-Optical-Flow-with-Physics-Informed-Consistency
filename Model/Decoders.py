@@ -80,7 +80,7 @@ class ConvexUpsampler(nn.Module):
 
 class FlowDecoderSingle(nn.Module):
     """
-    v26 decoder single step.
+    Decoder single step.
 
     Compared with Decoders_v20_fixed2:
       - keeps the same low-resolution flow head/refinement/context logic

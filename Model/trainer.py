@@ -3,7 +3,7 @@ import random
 import torch
 import torch.nn.functional as F
 
-from Encoders import (
+from .Encoders import (
     SequencePairEncoder,
     VisualBranchCNN,
     MotionBranchCNN,
@@ -12,9 +12,12 @@ from Encoders import (
     downsample_valid_mask,
     UNOLatentResidualHead,
 )
-from Decoders import FlowDecoder
-from neuralop_seg.uno import UNO
+from .Decoders import FlowDecoder
+from .neuralop_seg.uno import UNO
 
+# --------------------------------
+# This is a collection of Trainer utilities
+# --------------------------------
 
 def sobel_grad_map(x: torch.Tensor) -> torch.Tensor:
     if x.shape[1] > 1:
@@ -61,7 +64,8 @@ def weighted_epe_loss(pred, gt, image, valid=None, edge_weight_scale=1.0):
 
 
 def make_sampling_grid(flow: torch.Tensor):
-    """Return normalized grid and in-bound mask for forward flow used as backward sampling offsets.
+    """
+    Return normalized grid and in-bound mask for forward flow used as backward sampling offsets.
 
     flow: [B,2,H,W] in full-resolution pixel units. grid samples image2 at x + flow(x),
     which reconstructs image1 when flow is image1 -> image2.
@@ -103,7 +107,8 @@ def warp_flow(flow_to_sample, flow_grid):
 
 
 def forward_backward_confidence(flow_fw, flow_bw, alpha=0.01, beta=0.5, gamma=2.0, floor=0.05):
-    """Soft reliability confidence, not a hard sky mask.
+    """
+    Soft reliability confidence, not a hard sky mask.
 
     Forward-backward rule:
         flow_fw(x) + flow_bw(x + flow_fw(x)) should be close to 0.
@@ -139,7 +144,8 @@ def multiframe_fb_confidences(flows_fw, flows_bw, alpha=0.01, beta=0.5, gamma=2.
 
 
 def forward_backward_hard_mask(flow_fw, flow_bw, alpha1=0.01, alpha2=0.5, detach=True):
-    """UPFlow/UnFlow-style hard reliability mask for photometric loss.
+    """
+    Hard reliability mask for photometric loss from UPFlow/UnFlow.
 
     Valid if forward flow and warped backward flow are consistent:
         ||F_fw + warp(F_bw, F_fw)||^2 < alpha1 * (||F_fw||^2 + ||warp(F_bw)||^2) + alpha2
@@ -238,7 +244,8 @@ def pair_photometric_map(
     lambda_census=0.30,
     census_patch=7,
 ):
-    """Photometric error for a source->target flow.
+    """
+    Photometric error for a source->target flow.
 
     Correct direction: sample target at x + flow_src_to_tgt(x), then compare to source.
     The old version sampled source and compared to target, which only matches a target->source flow.
@@ -331,7 +338,8 @@ def multiframe_photometric_loss(
 
 
 def compose_adjacent_flows(flow_t_t1, flow_t1_t2):
-    """Compose adjacent flows into a two-step flow.
+    """
+    Compose adjacent flows into a two-step flow.
 
     F_{t->t+2}(x) = F_{t->t+1}(x) + F_{t+1->t+2}(x + F_{t->t+1}(x))
     """
@@ -351,7 +359,8 @@ def accumulated_multiframe_photometric_loss(
     robust_beta=10.0,
     max_skip=2,
 ):
-    """Longer-horizon photometric loss using composed adjacent flows.
+    """
+    Longer-horizon photometric loss using composed adjacent flows.
 
     For 4 frames this supervises I0->I2 and I1->I3. This exposes accumulated
     errors without requiring an extra direct F_{t->t+2} head.
@@ -383,7 +392,6 @@ def accumulated_multiframe_photometric_loss(
             weight = weight * texture_confidence(imgs[:, t], floor=texture_floor)
             weight = weight * robust_weight_from_error(pair_map, beta=robust_beta)
         if fb_conf is not None:
-            # confidence product is still non-zero for low-confidence sky due to floor
             weight = weight * fb_conf[:, t] * fb_conf[:, t + 1]
 
         total = total + (pair_map * weight).sum()
@@ -393,7 +401,9 @@ def accumulated_multiframe_photometric_loss(
 
 
 def accumulated_flow_smoothness_loss(flows, fb_conf=None):
-    """Gently regularize composed two-step flow so accumulated errors do not explode."""
+    """
+    'Gently' regularize composed two-step flow so accumulated errors do not explode.
+    """
     if flows.shape[1] < 2:
         return flows.new_tensor(0.0)
     vals = []
@@ -434,7 +444,8 @@ def edge_aware_smoothness_loss(flow, image):
 
 
 def multiframe_edge_aware_smoothness_loss(flows, imgs):
-    """Average edge-aware smoothness over every adjacent flow.
+    """
+    Average edge-aware smoothness over every adjacent flow.
 
     flows[:, t] is I_t -> I_{t+1}, so the edge image should be imgs[:, t].
     This keeps smoothness as a full-sequence regularizer instead of only applying
@@ -492,7 +503,7 @@ class Trainer:
         corrs = pair_out["corrs"]
 
         if flow_inits is None:
-            raise RuntimeError(f"v26 {arch} requires predict_flow_init=True in the pair encoder.")
+            raise RuntimeError(f"All variants require 'predict_flow_init=True' in the pair encoder.")
 
         if arch == "early":
             valid_ds = None

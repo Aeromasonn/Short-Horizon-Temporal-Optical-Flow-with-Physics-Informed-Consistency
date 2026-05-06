@@ -10,8 +10,8 @@ runs
 checkpoints/
 checkpoints_v2/
 *.pth
+*.pt
 
-# visualization outputs
 # all visualization outputs
 visualization_outputs*/
 runs/

@@ -1,6 +1,6 @@
 {
   "data": {
-    "data_root": "../Data",
+    "data_root": "TO DATA ROOT",
     "stats_file": "stats.json",
     "crop_size": [
       352,
@@ -128,11 +128,11 @@
     "fb_mask_alpha2": 0.5
   },
   "experiment": {
-    "experiment_name": "exp",
-    "save_dir": "checkpoints",
-    "tensorboard_dir": "runs",
-    "checkpoint_name": "fullpipeline_exp.pth",
-    "best_checkpoint_name": "fullpipeline_exp_best.pth",
+    "experiment_name": "NAME",
+    "save_dir": "Ckpts",
+    "tensorboard_dir": "DIR",
+    "checkpoint_name": "CKPT_NAME.pth",
+    "best_checkpoint_name": "EXP_NAME_best.pth",
     "config_dump_name": "config.json"
   },
     "Downstream": {
