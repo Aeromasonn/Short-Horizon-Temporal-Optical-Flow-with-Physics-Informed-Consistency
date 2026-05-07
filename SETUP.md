@@ -1,7 +1,9 @@
 This document explains how to set up the file structure of this project.
 
 To clone our GitHub Repository, run:
-`git clone https://github.com/Aeromasonn/Short-Horizon-Temporal-Optical-Flow-with-Physics-Informed-Consistency.git`
+```
+git clone https://github.com/Aeromasonn/Short-Horizon-Temporal-Optical-Flow-with-Physics-Informed-Consistency.git
+```
 
 Ideal Structure Layout:
 ```

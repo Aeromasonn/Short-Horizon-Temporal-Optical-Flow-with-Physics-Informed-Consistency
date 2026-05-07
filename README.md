@@ -7,7 +7,7 @@
 </p>
 
 **Description:**
-This project investigates **short-horizon spatiotemporal optical / scene flow estimation** by moving beyond 
+This project investigates **short-horizon spatiotemporal optical flow estimation** by moving beyond 
 the traditional two-frame formulation and treating motion as a temporally evolving spatial field. Instead of estimating
 motion independently between image pairs, we leverage multi-frame sequences to model motion dynamics over time.
 
