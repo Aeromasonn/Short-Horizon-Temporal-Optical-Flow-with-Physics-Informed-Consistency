@@ -6,85 +6,118 @@
   <a href="mailto:y.huang@dukekunshan.edu.cn">y.huang@dukekunshan.edu.cn</a>
 </p>
 
-This project investigates **short-horizon spatiotemporal optical / scene flow estimation** by moving beyond 
+**Description:**
+This project investigates **short-horizon spatiotemporal optical flow estimation** by moving beyond 
 the traditional two-frame formulation and treating motion as a temporally evolving spatial field. Instead of estimating
 motion independently between image pairs, we leverage multi-frame sequences to model motion dynamics over time.
 
-Our core idea is to bridge classical correspondence-based optical flow with **operator-based learning**, enabling the
+The core idea is to bridge classical correspondence-based optical flow with **operator-based learning**, enabling the
 model to capture both:
 - Local pixel-wise motion (pairwise flow)
 - Global spatiotemporal structure (motion evolution)
 
-**Pipeline**
-![Workflow1](Images/Readme_Supplements/Workflow%201.PNG)
-![Workflow2](Images/Readme_Supplements/Workflow%202.PNG)
+The pipeline integrates a pairwise flow encoder, a joint visual–motion fusion module, a U-shaped Fourier Neural Operator (UNO), and a PWC-style decoder to model spatiotemporal motion dynamics. A central objective of this work is to investigate how the placement of the neural operator affects model performance.
 
-**Outcome as of Milestone 2**
-Implementation: Full framework except from the Neural Operator module.
-Stage 1: With Sobel operator (enhance edge extraction), without self-supervision; 50 epochs
-- Example1:
-![sample_1](Images/Readme_Supplements/sample_1.png)
-- Example2:
-![sample_2](Images/Readme_Supplements/sample_2.png)
-- Example3:
-![sample_3](Images/Readme_Supplements/sample_3.png)
-- Example4:
-![sample_4](Images/Readme_Supplements/sample_4.png)
-- loss(After 50 epochs)
-![loss_50_epoch](Images/Readme_Supplements/loss_50_epoch.png)
+**What it does:**
+The framework takes a short sequence of consecutive frames as input and produces optical flow estimations for adjacent frame pairs. The model extracts motion and visual features, fuses them into a spatiotemporal representation, and refines this representation through a neural operator before decoding it into flow predictions.
 
-Stage 2: Adding self-supervision. Trained in DKUCC for 200 epochs:
-- Example1:
-![stage2_1](Images/Readme_Supplements/stage2_1.png)
-- Example2:
-![stage2_2](Images/Readme_Supplements/stage2_2.png)
-- Example3:
-![stage2_3](Images/Readme_Supplements/stage2_3.png)
-- loss after 200 epochs:
-![loss_200_epoch_stage3](Images/Readme_Supplements/stage2_loss_200_epoch.png)
+We implement and compare three architecture variants:
 
-Stage3: Adding edge awareness loss. Trained in DKUCC for 200 epochs:
-- Example1:
-![stage3_1](Images/Readme_Supplements/stage3_1.png)
-- sample2:
-![stage3_2](Images/Readme_Supplements/stage3_2.png)
-- sample3:
-![stage3_3](Images/Readme_Supplements/stage3_3.png)
-- loss after 200 epochs:
-![loss_200_epoch_stage3](Images/Readme_Supplements/stage3_loss_200_epoch.png)
+(1) Standalone UNO (Original Formulation)
 
-- supervised_predict example:
-![supervised_example1](Images/Readme_Supplements/supervised_example1.png)
+The UNO module is applied after the visual–motion fusion encoder, directly operating on fused spatiotemporal embeddings. Its output serves as the input to the decoder without additional residual connections.
 
-Two Promissing 400 epoch training outcome
+(2) Early Integration
 
-1. Version5, with edge-aware loss function, weighted EPE, after 400 epochs training.
+The UNO module is inserted before the fusion stage, immediately after the pairwise flow encoder. In this setting, the operator acts on lower-level motion representations, influencing how motion and visual features are subsequently combined.
 
-- Example1:
-![sample_1](Images/Readme_Supplements/v5_sample1.png)
-- Example2:
-![sample_2](Images/Readme_Supplements/v5_sample2.png)
-- Example3:
-![sample_3](Images/Readme_Supplements/v5_sample3.png)
+(3) Late Integration (Refinement)
 
-Looks have better performance on Sky (Magnitude)
+The UNO module is applied after the fusion encoder as a residual refinement module. Instead of replacing the fused representation, the operator outputs a latent update that is added to the original embedding before decoding. 
 
-- loss(After 400 epochs)
-![loss_50_epoch](Images/Readme_Supplements/v5_loss_400epoch.png)
+Below shows a combined Pipeline Overview of the framework and the variants described above:
 
-2. Version12, base on Version5, add 1: refinement stage in decoder 2:added boundary-related supervision; added a sky-related auxiliary term; change lamda settings of temperol loss from 0.1 to 0.03
+![Pipeline Overview](Images/Readme_Supplements/Workflow_3-in-1.png)
 
-- Example1:
-![sample_1](Images/Readme_Supplements/v12_sample1.png)
-- Example2:
-![sample_2](Images/Readme_Supplements/v12_sample2.png)
-- Example3:
-![sample_3](Images/Readme_Supplements/v12_sample3.png)
+**Quick Start:**
+After SETUP.md:
+To train the Standalone Architecture, run:
+```
+python train.py --config config.json --architecture_type standalone
+```
+To train the Early Integration Architecture, run:
+```
+python train.py --config config.json --architecture_type early
+```
+To train the Late Integration Architecture, run:
+```
+python train.py --config config.json --architecture_type later
+```
+To visualize single frame result (example: Late Integration) with EPE map, run:
+```
+python visualization.py --config config.json --checkpoint PATH_TO_FLOW_CHECKPOINT.pth --architecture_type TYPE --mode single
+```
+To visualize short-horizon multiple frames result, run:
+```
+python visualization.py --config config.json --checkpoint PATH_TO_FLOW_CHECKPOINT.pth --architecture_type TYPE --mode multiple
+```
+To train downstream object recognition, run:
+```
+python -m Downstream_Train --config config.json --flow_ckpt PATH_TO_CHECKPOINT.pth
+```
+To run downstream object recognition inference, run:
+```
+python -m Downstream_Inference --config config.json --flow_ckpt PATH_TO_FLOW_CHECKPOINT.pth --detector_ckpt PATH_TO_DETECTOR_CKPT.pt --out_dir DIR --save_gt --score_thresh YOUR_THRESHOLD
+```
+You may toggle `use_gtFlow_for_training` in config.json
 
-- loss(After 400 epochs)
-![loss_50_epoch](Images/Readme_Supplements/v12_loss_400epoch.png)
+To use other architectures, simply replace `later` with `early` or `standalone` in both `--checkpoint` and `--architecture_type`.
 
-Looks much better in edge detection, but don't know why the sky is even worse even Sky loss is introduced
+We do provide precomputed stats on images and a template default `config.json` in `utils`. But they are also included in respective directories for easy access.
 
-Best So Far (v24, 570 epochs)
-![sample_3](Images/Readme_Supplements/best.png)
+These models are based on the same training configurations as the existing `config.json` in this repository. All models are trained for 400 epochs. The checkpoints record the best training outcome throughout the total *400* epochs.
+
+**Example Results:**
+We evaluate the performance of three architecture variants under the same training and experimental settings on KITTI 2015 training set. The comparison focuses on standard optical flow metrics, including End-Point Error (EPE), per-image EPE (F1-EPE), and outlier ratio (F1-all%).
+
+| Model Variant        | EPE ↓    | F1-EPE ↓ | F1-all% ↓ |
+|---------------------|----------|----------|-----------|
+| Standalone          | 2.9234   | 2.7889   | **20.59** |
+| Early Integration   | **2.6255** | **2.5596** | 22.11     |
+| Late Integration    | 2.7647   | 2.6673   | 23.30     |
+
+Here we also show a few estimation results from our model:
+
+*Pairwise* estimation; *Early* Integration:
+
+![est_early](Images/Estimations/flow_est-early.jpg)
+
+*Short-horizon* estimation; *Early* Integration:
+
+![sh_early](Images/Estimations/flow_sh-early.jpg)
+
+*Pairwise* estimation; *Late* Integration:
+
+![est_late](Images/Estimations/flow_est-late.jpg)
+
+*Short-horizon* estimation; *Late* Integration:
+
+![sh_late](Images/Estimations/flow_sh-late.jpg)
+
+*Pairwise* estimation; *Standalone*:
+
+![est_standalone](Images/Estimations/flow_est-standalone.jpg)
+
+*Short-horizon* estimation; *Standalone*:
+
+![sh_standalone](Images/Estimations/flow_sh-standalone.jpg)
+
+We demonstrate the downstream application using a simple motion detection task. For example:
+
+![downstream](Images/Estimations/Downstream_est_trained.png)
+
+where estimations of our model can be recognized by machine vision.
+
+To acquire our pretrained parameters, please visit:
+
+https://drive.google.com/drive/folders/1sI5MRbYDaK74UZoG1SCNU_EO40zRdl8L

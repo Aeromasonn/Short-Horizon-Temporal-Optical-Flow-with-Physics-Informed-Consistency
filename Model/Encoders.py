@@ -313,11 +313,15 @@ def downsample_valid_mask(valid, size_hw):
 def build_uno_input_2d(fused_seq, flow_inits, valid_mask=None):
     """
     Build a 2D UNO input by stacking time into channels.
+    Specifically:
+        torch.cat([fused_seq, flow_inits, grad_x, grad_y], dim=2)
+    This allows UNO to better take in time and spatial gradients.
 
     Inputs:
         fused_seq:   [B, Tm, Cf, H, W]
         flow_inits:  [B, Tm, 2, H, W]
         valid_mask:  [B, 1, H, W] or None
+        x, y grads:  [B, Tm, 2, H, W]
     Output:
         uno_in:      [B, Tm*(Cf+6) + valid_extra, H, W]
     """

@@ -8,15 +8,14 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+from .DataLoader import TempFlowDataset_disp
+from .trainer import Trainer, build_modules, save_checkpoint, set_seed
+
 THIS_DIR = Path(__file__).resolve().parent
 MODULE_DIR = THIS_DIR.parent  
 
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
-
-from DataLoader import TempFlowDataset_disp
-from trainer import Trainer, build_modules, save_checkpoint, set_seed
-
 
 def parse_args():
     parser = argparse.ArgumentParser(

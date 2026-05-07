@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class ConvBlock(nn.Module):
     def __init__(self, in_ch, out_ch, k=3, s=1, p=1, d=1, norm=True):
         super().__init__()
@@ -81,7 +80,7 @@ class ConvexUpsampler(nn.Module):
 
 class FlowDecoderSingle(nn.Module):
     """
-    v26 decoder single step.
+    Decoder single step.
 
     Compared with Decoders_v20_fixed2:
       - keeps the same low-resolution flow head/refinement/context logic
